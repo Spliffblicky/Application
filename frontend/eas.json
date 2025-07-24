@@ -8,11 +8,23 @@
       "developmentClient": true,
       "distribution": "internal"
     },
+    "build": {
+      "android": {
+        "workflow": "managed"
+      },
+      "ios": {
+        "workflow": "managed"
+      }
+    },
     "preview": {
       "distribution": "internal"
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "android": {
+        "buildType": "app-bundle",
+        "jdk": "17"
+      }
     }
   },
   "submit": {
