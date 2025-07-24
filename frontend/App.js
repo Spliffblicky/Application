@@ -1,8 +1,7 @@
 import React, { useContext } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { ActivityIndicator, View } from 'react-native';
-
+import { ActivityIndicator, View, Text, StyleSheet } from 'react-native';
 import { AuthProvider, AuthContext } from './screens/AuthContext';
 
 // Auth flow screens
@@ -32,10 +31,15 @@ import TwoFactorScreen from './screens/TwoFactorScreen';
 
 const Stack = createNativeStackNavigator();
 
+const screenOptions = {
+  headerShown: false,
+  animation: 'slide_from_right',
+};
+
 // Auth stack
 function AuthStack() {
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
+    <Stack.Navigator screenOptions={screenOptions}>
       <Stack.Screen name="OnboardingWelcome" component={OnboardingWelcomeScreen} />
       <Stack.Screen name="OnboardingPermissions" component={OnboardingPermissionsScreen} />
       <Stack.Screen name="OnboardingFinish" component={OnboardingFinishScreen} />
@@ -49,7 +53,7 @@ function AuthStack() {
 // Main app stack
 function MainAppStack() {
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
+    <Stack.Navigator screenOptions={screenOptions}>
       <Stack.Screen name="MainTabs" component={BottomTabNavigation} />
       <Stack.Screen name="Notifications" component={NotificationsScreen} />
       <Stack.Screen name="Settings" component={SettingsScreen} />
@@ -69,16 +73,36 @@ function MainAppStack() {
   );
 }
 
+// Loading component
+function LoadingScreen() {
+  return (
+    <View style={styles.loadingContainer}>
+      <ActivityIndicator size="large" color="#0061FF" />
+      <Text style={styles.loadingText}>Loading...</Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'white',
+  },
+  loadingText: {
+    marginTop: 16,
+    fontSize: 16,
+    color: '#666',
+  },
+});
+
 // Conditional navigator
 function AppNavigator() {
   const { jwt, loading } = useContext(AuthContext);
 
   if (loading) {
-    return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-        <ActivityIndicator size="large" color="#0061FF" />
-      </View>
-    );
+    return <LoadingScreen />;
   }
 
   return jwt ? <MainAppStack /> : <AuthStack />;
