@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, SafeAreaView, Alert, ActivityIndicator } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL, verifyEmail } from './api';
-import CustomPrompt from './CustomPrompt';
+import CustomPrompt from './CustomPromptScreen';
 
 export default function EmailVerificationScreen({ navigation, route }) {
   const [code, setCode] = useState(['', '', '', '', '', '']);
@@ -38,7 +38,7 @@ export default function EmailVerificationScreen({ navigation, route }) {
 
   const handleVerify = async () => {
     setLoading(true);
-      const codeStr = code.join('');
+    const codeStr = code.join('');
     if (codeStr.length !== 6) {
       setPromptMessage('Please enter the 6-digit code.');
       setPromptSuccess(false);

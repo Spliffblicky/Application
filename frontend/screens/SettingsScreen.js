@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, TouchableOpacity, SectionList, Alert, ScrollVie
 import Feather from 'react-native-vector-icons/Feather';
 import TermsSVG from '../assets/images/undraw_terms_sx63.svg';
 import FeedbackSVG from '../assets/images/undraw_feedback_ebmx.svg';
-import CustomPrompt from './CustomPrompt';
+import CustomPrompt from './CustomPromptScreen';
 
 const accountSettings = [
   { icon: 'file-text', label: 'Terms of service', nav: 'TermsOfService' },
@@ -67,35 +67,35 @@ export default function SettingsScreen({ navigation }) {
         <View style={styles.sectionCard}>
           <Text style={styles.sectionHeaderText}>App</Text>
           {appSettings.map((item, idx) => (
-        <TouchableOpacity
+            <TouchableOpacity
               key={idx}
-          style={styles.row}
-          activeOpacity={0.85}
-          onPress={() => {
-            if (item.nav) navigation.navigate(item.nav);
-            else if (item.label.includes('App version')) {
-              setPromptMessage('CloudStore App Version\n428.2.2');
-              setPromptSuccess(true);
-              setPromptVisible(true);
-            } else if (item.label.toLowerCase().includes('reset photos tab')) {
-              setPromptMessage('Photos tab reset successfully!');
-              setPromptSuccess(true);
-              setPromptVisible(true);
-            } else if (item.label.toLowerCase().includes('clear cache')) {
-              setConfirmAction('cache');
-              setConfirmVisible(true);
-            } else if (item.label.toLowerCase().includes('search history')) {
-              setConfirmAction('search');
-              setConfirmVisible(true);
-            }
-          }}
-        >
+              style={styles.row}
+              activeOpacity={0.85}
+              onPress={() => {
+                if (item.nav) navigation.navigate(item.nav);
+                else if (item.label.includes('App version')) {
+                  setPromptMessage('CloudStore App Version\n428.2.2');
+                  setPromptSuccess(true);
+                  setPromptVisible(true);
+                } else if (item.label.toLowerCase().includes('reset photos tab')) {
+                  setPromptMessage('Photos tab reset successfully!');
+                  setPromptSuccess(true);
+                  setPromptVisible(true);
+                } else if (item.label.toLowerCase().includes('clear cache')) {
+                  setConfirmAction('cache');
+                  setConfirmVisible(true);
+                } else if (item.label.toLowerCase().includes('search history')) {
+                  setConfirmAction('search');
+                  setConfirmVisible(true);
+                }
+              }}
+            >
               <Feather name={item.icon} size={22} color={'#888'} style={styles.icon} />
               <Text style={styles.text}>{item.label}</Text>
             </TouchableOpacity>
           ))}
         </View>
-        <View style={[styles.sectionCard, { borderColor: 'crimson', borderWidth: 1 }] }>
+        <View style={[styles.sectionCard, { borderColor: 'crimson', borderWidth: 1 }]}>
           <Text style={[styles.sectionHeaderText, { color: 'crimson' }]}>Danger Zone</Text>
           {dangerZone.map((item, idx) => (
             <TouchableOpacity
@@ -108,7 +108,7 @@ export default function SettingsScreen({ navigation }) {
             >
               <Feather name={item.icon} size={22} color={'crimson'} style={styles.icon} />
               <Text style={[styles.text, { color: 'crimson' }]}>{item.label}</Text>
-        </TouchableOpacity>
+            </TouchableOpacity>
           ))}
         </View>
         <View style={styles.dangerIllustrationWrap}>

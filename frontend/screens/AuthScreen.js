@@ -4,7 +4,7 @@ import Feather from 'react-native-vector-icons/Feather';
 import { AntDesign } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { loginUser, registerUser } from './api';
-import CustomPrompt from './CustomPrompt';
+import CustomPrompt from './CustomPromptScreen';
 import { AuthContext } from './AuthContext';
 
 export default function AuthScreen({ navigation }) {
@@ -148,7 +148,7 @@ export default function AuthScreen({ navigation }) {
         </View>
         {/* Flip Card */}
         <View style={{ height: 340, width: '100%', alignItems: 'center', marginTop: 10 }}>
-          <Animated.View style={[styles.flipCard, { transform: [{ rotateY: frontInterpolate }] }]}> 
+          <Animated.View style={[styles.flipCard, { transform: [{ rotateY: frontInterpolate }] }]}>
             {isLogin && (
               <View style={styles.form}>
                 <TextInput
@@ -183,7 +183,7 @@ export default function AuthScreen({ navigation }) {
               </View>
             )}
           </Animated.View>
-          <Animated.View style={[styles.flipCard, styles.flipCardBack, { transform: [{ rotateY: backInterpolate }] }]}> 
+          <Animated.View style={[styles.flipCard, styles.flipCardBack, { transform: [{ rotateY: backInterpolate }] }]}>
             {!isLogin && (
               <View style={styles.form}>
                 <TextInput
