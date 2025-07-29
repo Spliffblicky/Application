@@ -1,8 +1,12 @@
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, FlatList, Image, Dimensions, SafeAreaView } from 'react-native';
+import React, { useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, FlatList, Image, Dimensions, SafeAreaView, ScrollView } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import axios from 'axios';
 import { useNavigation } from '@react-navigation/native';
+import { useTheme } from '../theme/ThemeContext';
+import { LinearGradient } from 'expo-linear-gradient';
+import { BlurView } from 'expo-blur';
+import { useFonts, Inter_400Regular, Inter_700Bold } from '@expo-google-fonts/inter';
 
 const PHOTO_SIZE = (Dimensions.get('window').width - 64) / 3;
 const photos = [
@@ -17,62 +21,70 @@ const photos = [
   { id: '9', uri: 'https://images.unsplash.com/photo-1515378791036-0648a3ef77b2' }, // polaroid collage
 ];
 
+// Constants moved to theme system
+
 export default function PhotosScreen() {
+  const { theme, constants } = useTheme();
   const navigation = useNavigation();
+  // let [fontsLoaded] = useFonts({ Inter_400Regular, Inter_700Bold });
+  // if (!fontsLoaded) return null;
+
+  const [isPickingDocument, setIsPickingDocument] = useState(false);
 
   const pickAndUploadFile = async () => {
-    const result = await DocumentPicker.getDocumentAsync({});
-    if (result.type === 'success') {
-      const formData = new FormData();
-      formData.append('files', {
-        uri: result.uri,
-        name: result.name,
-        type: result.mimeType || 'application/octet-stream',
-      });
-      // Replace with your backend URL and add auth headers if needed
-      await axios.post('http://YOUR_BACKEND_URL/api/files/upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-      // Optionally show a success prompt or refresh
+    if (isPickingDocument) return;
+    setIsPickingDocument(true);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({});
+      if (result.type === 'success') {
+        const formData = new FormData();
+        formData.append('files', {
+          uri: result.uri,
+          name: result.name,
+          type: result.mimeType || 'application/octet-stream',
+        });
+        // Replace with your backend URL and add auth headers if needed
+        await axios.post('http://192.168.62.13:8080/api/files/upload', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        // Optionally show a success prompt or refresh
+      }
+    } finally {
+      setIsPickingDocument(false);
     }
   };
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: '#f6f6f2' }}>
-      <FlatList
-        data={[]}
-        ListHeaderComponent={
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Photos</Text>
-            <Text style={styles.cardSubtitle}>Today</Text>
-            <FlatList
-              data={photos}
-              keyExtractor={item => item.id}
-              numColumns={3}
-              scrollEnabled={false}
-              renderItem={({ item }) => (
-                <Image source={{ uri: item.uri }} style={styles.photo} />
-              )}
-              contentContainerStyle={styles.grid}
-            />
-          </View>
-        }
-        ListFooterComponent={
-          <>
-            <Text style={styles.title}>Photos</Text>
-            <Text style={styles.subtitle}>Come here to view and edit photos and videos, and manage camera uploads.</Text>
-            <TouchableOpacity style={styles.primaryBtn} activeOpacity={0.85} onPress={() => navigation.navigate('BackupLoading')}>
-              <Text style={styles.primaryBtnText}>Back up photos</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.secondaryBtn} activeOpacity={0.85} onPress={pickAndUploadFile}>
-              <Text style={styles.secondaryBtnText}>Upload photos</Text>
-              </TouchableOpacity>
-          </>
-        }
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-      />
-    </SafeAreaView>
+    <View style={{ flex: 1, backgroundColor: theme.background }}>
+      <ScrollView contentContainerStyle={{ paddingBottom: 48 }} showsVerticalScrollIndicator={false}>
+        <BlurView intensity={80} tint="dark" style={{ backgroundColor: constants.glassBg, borderRadius: 22, borderWidth: 1, borderColor: constants.glassBorder, marginTop: 18, marginBottom: 18, marginHorizontal: 12, alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.10, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 4, paddingTop: 16, paddingBottom: 12 }}>
+          <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 24, color: constants.primaryText, alignSelf: 'flex-start', marginLeft: 16, marginBottom: 2 }}>Photos</Text>
+          <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 16, color: constants.secondaryText, alignSelf: 'flex-start', marginLeft: 16, marginBottom: 6 }}>Today</Text>
+          <FlatList
+            data={photos}
+            keyExtractor={item => item.id}
+            numColumns={3}
+            scrollEnabled={false}
+            renderItem={({ item }) => (
+              <Image source={{ uri: item.uri }} style={styles.photo} />
+            )}
+            contentContainerStyle={styles.grid}
+          />
+        </BlurView>
+        <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 28, color: constants.primaryText, marginBottom: 4, alignSelf: 'flex-start', marginLeft: 16 }}>Photos</Text>
+        <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 16, color: constants.secondaryText, marginBottom: 10, alignSelf: 'flex-start', marginLeft: 16, marginRight: 16 }}>
+          Come here to view and edit photos and videos, and manage camera uploads.
+        </Text>
+        <TouchableOpacity style={{ borderRadius: 24, paddingVertical: 18, paddingHorizontal: 24, alignItems: 'center', width: '80%', marginBottom: 16, alignSelf: 'center', backgroundColor: constants.accent, shadowOpacity: 0.10, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 2 }} activeOpacity={0.85} onPress={() => navigation.navigate('BackupLoading')}>
+          <Text style={{ color: constants.primaryText, fontFamily: 'Inter_700Bold', fontSize: 18 }}>Back up photos</Text>
+        </TouchableOpacity>
+        <BlurView intensity={60} tint="dark" style={{ borderRadius: 24, overflow: 'hidden', width: '80%', alignSelf: 'center', marginBottom: 8, borderWidth: 1.5, borderColor: constants.accent }}>
+          <TouchableOpacity style={{ borderRadius: 24, paddingVertical: 18, paddingHorizontal: 24, alignItems: 'center', width: '100%' }} activeOpacity={0.85} onPress={pickAndUploadFile} disabled={isPickingDocument}>
+            <Text style={{ color: constants.accent, fontFamily: 'Inter_700Bold', fontSize: 18 }}>Upload photos</Text>
+          </TouchableOpacity>
+        </BlurView>
+      </ScrollView>
+    </View>
   );
 }
 
@@ -80,18 +92,15 @@ const styles = StyleSheet.create({
   scrollContent: {
     padding: 0,
     alignItems: 'stretch',
-    backgroundColor: '#f6f6f2',
     paddingBottom: 10,
     minHeight: undefined,
   },
   card: {
     width: '100%',
-    backgroundColor: '#fff',
     borderRadius: 18,
     marginTop: 10,
     marginBottom: 10,
     alignItems: 'center',
-    shadowColor: '#000',
     shadowOpacity: 0.08,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 2 },
@@ -102,14 +111,12 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 24,
     fontWeight: 'bold',
-    color: '#222',
     alignSelf: 'flex-start',
     marginLeft: 16,
     marginBottom: 2,
   },
   cardSubtitle: {
     fontSize: 16,
-    color: '#444',
     alignSelf: 'flex-start',
     marginLeft: 16,
     marginBottom: 6,
@@ -124,26 +131,22 @@ const styles = StyleSheet.create({
     height: PHOTO_SIZE,
     borderRadius: 8,
     margin: 4,
-    backgroundColor: '#eee',
   },
   title: {
     fontSize: 28,
     fontWeight: 'bold',
-    color: '#222',
     marginBottom: 4,
     alignSelf: 'flex-start',
     marginLeft: 16,
   },
   subtitle: {
     fontSize: 16,
-    color: '#888',
     marginBottom: 10,
     alignSelf: 'flex-start',
     marginLeft: 16,
     marginRight: 16,
   },
   primaryBtn: {
-    backgroundColor: '#0061FF',
     borderRadius: 24,
     paddingVertical: 18,
     paddingHorizontal: 24,
@@ -153,24 +156,20 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
   },
   primaryBtnText: {
-    color: '#fff',
     fontWeight: 'bold',
     fontSize: 18,
   },
   secondaryBtn: {
-    backgroundColor: '#fff',
     borderRadius: 24,
     paddingVertical: 18,
     paddingHorizontal: 24,
     alignItems: 'center',
     width: '80%',
     borderWidth: 1.5,
-    borderColor: '#e0e0e0',
     marginBottom: 8,
     alignSelf: 'center',
   },
   secondaryBtnText: {
-    color: '#222',
     fontWeight: 'bold',
     fontSize: 18,
   },

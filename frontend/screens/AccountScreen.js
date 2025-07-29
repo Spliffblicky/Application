@@ -1,9 +1,14 @@
-import React, { useContext, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, SectionList, Alert, SafeAreaView, ScrollView, Image } from 'react-native';
+import React, { useContext, useState, useRef, useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView, ScrollView, Image, Modal, ActivityIndicator, Animated } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import Feather from 'react-native-vector-icons/Feather';
 import { AuthContext } from './AuthContext';
-import LogoutSVG from '../assets/images/undraw_log-out_2vod.svg';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useIsFocused } from '@react-navigation/native';
+import { useTheme } from '../theme/ThemeContext';
+import { getCurrentUser, listFiles } from './api';
+import { useFonts, Inter_400Regular, Inter_700Bold } from '@expo-google-fonts/inter';
+
 
 const user = {
   name: 'lazarus sam',
@@ -31,9 +36,44 @@ const sections = [
   { title: 'Keep work moving', data: [{}], key: 'keepwork' },
 ];
 
+// Constants moved to theme system
+
 export default function AccountScreen({ navigation }) {
   const { logout } = useContext(AuthContext);
-  const [avatarUri, setAvatarUri] = useState('https://randomuser.me/api/portraits/men/32.jpg');
+  const { theme, constants } = useTheme();
+  const [avatarUri, setAvatarUri] = useState(null);
+  const [storage, setStorage] = useState('4.0 MB / 2.0 GB');
+  const [showLogoutModal, setShowLogoutModal] = useState(false);
+  const isFocused = useIsFocused();
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(fadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
+  }, []);
+  useEffect(() => {
+    const fetchStorage = async () => {
+      const newStorage = await AsyncStorage.getItem('user_storage');
+      if (newStorage) {
+        setStorage(`4.0 MB / ${newStorage}`);
+      } else {
+        setStorage('4.0 MB / 2.0 GB');
+      }
+    };
+    fetchStorage();
+  }, [isFocused]);
+
+  useEffect(() => {
+    const loadProfilePicture = async () => {
+      try {
+        const savedAvatarUri = await AsyncStorage.getItem('user_avatar_uri');
+        if (savedAvatarUri) {
+          setAvatarUri(savedAvatarUri);
+        }
+      } catch (error) {
+        console.log('Error loading profile picture:', error);
+      }
+    };
+    loadProfilePicture();
+  }, []);
 
   const pickImage = async () => {
     let result = await ImagePicker.launchImageLibraryAsync({
@@ -43,542 +83,640 @@ export default function AccountScreen({ navigation }) {
       quality: 0.7,
     });
     if (!result.canceled && result.assets && result.assets[0]?.uri) {
-      setAvatarUri(result.assets[0].uri);
+      const newAvatarUri = result.assets[0].uri;
+      setAvatarUri(newAvatarUri);
+      // Save to AsyncStorage for persistence
+      try {
+        await AsyncStorage.setItem('user_avatar_uri', newAvatarUri);
+      } catch (error) {
+        console.log('Error saving profile picture:', error);
+      }
     }
   };
 
+  const [userProfile, setUserProfile] = useState({ name: '', email: '', storageQuota: 0 });
+  const [totalFileSize, setTotalFileSize] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    const fetchUserProfileAndFiles = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const token = await AsyncStorage.getItem('jwt');
+        if (!token) {
+          setError('No token found.');
+          setLoading(false);
+          return;
+        }
+        const res = await getCurrentUser(token);
+        if (res.success && res.data) {
+          setUserProfile({
+            name: res.data.name,
+            email: res.data.email,
+            storageQuota: res.data.storageQuota && res.data.storageQuota > 0 ? res.data.storageQuota : 1073741824, // 1GB default
+          });
+        } else {
+          setError('Failed to fetch user profile.');
+        }
+        // Fetch all files and sum their sizes
+        const filesRes = await listFiles(token);
+        if (filesRes.success && Array.isArray(filesRes.data)) {
+          const sum = filesRes.data.reduce((acc, f) => acc + (f.size || 0), 0);
+          setTotalFileSize(sum);
+        } else {
+          setTotalFileSize(0);
+        }
+      } catch (err) {
+        setError('Failed to fetch user profile.');
+        setTotalFileSize(0);
+      }
+      setLoading(false);
+    };
+    fetchUserProfileAndFiles();
+  }, [isFocused]);
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
+  // Helper to format quota nicely (e.g., 1 GB instead of 1073741824 B)
+  function formatQuota(bytes) {
+    if (bytes === 1073741824) return '1 GB';
+    return formatBytes(bytes);
+  }
+
+  let [fontsLoaded] = useFonts({ Inter_400Regular, Inter_700Bold });
+  if (!fontsLoaded) return null;
+
   return (
-    <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <View style={styles.profileCardSmallPadding}>
-          <View style={styles.topRowSmallPadding}>
-              <View style={styles.avatarWrap}>
-              <TouchableOpacity onPress={pickImage} activeOpacity={0.8} style={styles.avatarCircleImgWrap}>
-                <Image source={{ uri: avatarUri }} style={styles.avatarCircleImg} />
-                <View style={styles.editAvatarOverlay}>
-                  <Feather name="edit-3" size={16} color="#fff" />
+    <View style={{ flex: 1, backgroundColor: '#000000' }}>
+      <SafeAreaView style={{ flex: 1 }}>
+      {/* Header */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 16, marginBottom: 8 }}>
+        <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 28, color: '#FFFFFF' }}>Account</Text>
+        <TouchableOpacity style={{ padding: 8, borderRadius: 20, backgroundColor: '#1D9BF0' }} onPress={() => navigation.navigate('Settings')} activeOpacity={0.8}>
+          <Feather name="settings" size={20} color="#FFFFFF" />
+        </TouchableOpacity>
+      </View>
+      <ScrollView contentContainerStyle={{ paddingBottom: 80, paddingTop: 8 }} showsVerticalScrollIndicator={false}>
+        {/* Profile Section */}
+        <View style={{ paddingHorizontal: 16, paddingVertical: 20, borderBottomWidth: 1, borderBottomColor: '#333333' }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <TouchableOpacity onPress={pickImage} activeOpacity={0.8} style={{ marginRight: 16, position: 'relative' }}>
+                {avatarUri ? (
+                  <Image source={{ uri: avatarUri }} style={{ width: 64, height: 64, borderRadius: 32 }} />
+                ) : (
+                  <View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: '#1D9BF0', alignItems: 'center', justifyContent: 'center' }}>
+                    <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#FFFFFF' }}>
+                      {userProfile.name ? userProfile.name.charAt(0).toUpperCase() : 'U'}
+                    </Text>
+                  </View>
+                )}
+                <View style={{ position: 'absolute', bottom: 0, right: 0, backgroundColor: '#1D9BF0', borderRadius: 12, padding: 4, borderWidth: 2, borderColor: '#000000' }}>
+                  <Feather name="edit-3" size={12} color="#FFFFFF" />
                 </View>
                 </TouchableOpacity>
+            <View style={{ flex: 1, justifyContent: 'center', minWidth: 0 }}>
+                {loading ? (
+                <ActivityIndicator size="small" color="#1D9BF0" style={{ marginTop: 0 }} />
+                ) : error ? (
+                <Text style={{ color: '#F91880', fontFamily: 'Inter_400Regular', marginTop: 0, fontSize: 14, textAlign: 'left' }} numberOfLines={1} adjustsFontSizeToFit>{error}</Text>
+                ) : (
+                  <>
+                  <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 18, color: '#FFFFFF', marginBottom: 4, textAlign: 'left' }} numberOfLines={1} adjustsFontSizeToFit>{userProfile.name}</Text>
+                  <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 14, color: '#8B98A5', textAlign: 'left' }} numberOfLines={1} adjustsFontSizeToFit>{userProfile.email}</Text>
+                  </>
+                )}
+            </View>
+          </View>
+        </View>
+
+        {/* Storage Card - Dropbox Style Split Layout */}
+        <View style={{ backgroundColor: '#000000', borderRadius: 16, borderWidth: 1, borderColor: '#333333', marginHorizontal: 16, marginTop: 24, marginBottom: 16, overflow: 'hidden' }}>
+
+          {/* Header */}
+          <View style={{ paddingHorizontal: 20, paddingTop: 20, paddingBottom: 16 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <View style={{ backgroundColor: '#1D9BF0', borderRadius: 8, padding: 8, marginRight: 12 }}>
+                <Text style={{ fontSize: 16, color: '#FFFFFF' }}>☁️</Text>
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.name}>{user.name}</Text>
-                <Text style={styles.email}>{user.email}</Text>
+                <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 16, color: '#FFFFFF', marginBottom: 2 }}>CloudStore Storage</Text>
+                <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 14, color: '#8B98A5' }}>
+                  {formatBytes(totalFileSize)} of {formatQuota(userProfile.storageQuota)} used
+                </Text>
               </View>
-              <TouchableOpacity style={styles.settingsIconWrap} onPress={() => navigation.navigate('Settings')} activeOpacity={0.7}>
-                <Feather name="settings" size={26} color="#888" />
+            </View>
+          </View>
+
+          {/* Split Content - Two Halves */}
+          <View style={{ flexDirection: 'row', minHeight: 120 }}>
+
+            {/* Left Half - Circular Progress */}
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 20, borderRightWidth: 1, borderRightColor: '#333333' }}>
+              {(() => {
+                let percent = userProfile.storageQuota && userProfile.storageQuota > 0 ? (totalFileSize / userProfile.storageQuota) * 100 : 0;
+                let displayPercent = Math.min(100, Math.max(0, percent)); // Ensure it's between 0-100
+
+                return (
+                  <View style={{ alignItems: 'center' }}>
+                    {/* Circular Progress Indicator */}
+                    <View style={{
+                      width: 70,
+                      height: 70,
+                      borderRadius: 35,
+                      borderWidth: 6,
+                      borderColor: '#333333',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      position: 'relative'
+                    }}>
+                      {/* Progress Arc - Multiple segments for better visual */}
+                      {displayPercent > 0 && (
+                        <>
+                          {displayPercent >= 25 && <View style={{ position: 'absolute', width: 70, height: 70, borderRadius: 35, borderWidth: 6, borderColor: 'transparent', borderTopColor: '#1D9BF0', transform: [{ rotate: '0deg' }] }} />}
+                          {displayPercent >= 50 && <View style={{ position: 'absolute', width: 70, height: 70, borderRadius: 35, borderWidth: 6, borderColor: 'transparent', borderRightColor: '#1D9BF0', transform: [{ rotate: '0deg' }] }} />}
+                          {displayPercent >= 75 && <View style={{ position: 'absolute', width: 70, height: 70, borderRadius: 35, borderWidth: 6, borderColor: 'transparent', borderBottomColor: '#1D9BF0', transform: [{ rotate: '0deg' }] }} />}
+                          {displayPercent > 75 && <View style={{ position: 'absolute', width: 70, height: 70, borderRadius: 35, borderWidth: 6, borderColor: 'transparent', borderLeftColor: '#1D9BF0', transform: [{ rotate: `${((displayPercent - 75) / 25) * 90}deg` }] }} />}
+                        </>
+                      )}
+                      <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 14, color: '#FFFFFF' }}>
+                        {displayPercent.toFixed(1)}%
+                      </Text>
+                    </View>
+                    <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 12, color: '#8B98A5', marginTop: 8, textAlign: 'center' }}>
+                      Storage used
+                    </Text>
+                  </View>
+                );
+              })()}
+            </View>
+
+            {/* Right Half - Upgrade Button */}
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 20 }}>
+              <TouchableOpacity
+                style={{
+                  backgroundColor: '#1D9BF0',
+                  borderRadius: 12,
+                  paddingVertical: 14,
+                  paddingHorizontal: 20,
+                  width: '100%',
+                  alignItems: 'center'
+                }}
+                activeOpacity={0.8}
+                onPress={() => navigation.navigate('ManagePlan', { userEmail: userProfile.email })}
+              >
+                <Text style={{ color: '#FFFFFF', fontFamily: 'Inter_700Bold', fontSize: 15, marginBottom: 4 }}>Upgrade to Plus</Text>
+                <Text style={{ color: '#FFFFFF', fontFamily: 'Inter_400Regular', fontSize: 12, opacity: 0.9 }}>Get more storage</Text>
+              </TouchableOpacity>
+
+              <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 11, color: '#8B98A5', marginTop: 12, textAlign: 'center' }}>
+                Starting at 60 cedis/month
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Security Section Header */}
+        <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
+          <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 13, color: '#8B98A5', textTransform: 'uppercase', letterSpacing: 0.5 }}>Security</Text>
+        </View>
+
+        {/* Security Items */}
+        {securityOptions.map((item, idx) => (
+          <TouchableOpacity
+            key={idx}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              paddingHorizontal: 16,
+              paddingVertical: 14,
+              borderBottomWidth: idx !== securityOptions.length - 1 ? 0.5 : 0,
+              borderBottomColor: '#333333'
+            }}
+            activeOpacity={0.8}
+            onPress={() => {
+              if (item.label === 'Change password') navigation.navigate('ChangePassword');
+              if (item.label === 'Two-factor authentication') navigation.navigate('TwoFactor');
+            }}
+          >
+            <Feather name={item.icon} size={20} color="#1D9BF0" style={{ marginRight: 12 }} />
+            <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 16, color: '#FFFFFF', flex: 1 }}>{item.label}</Text>
+            <Feather name="chevron-right" size={16} color="#8B98A5" />
+          </TouchableOpacity>
+        ))}
+
+        {/* Connected Apps Section Header */}
+        <View style={{ paddingHorizontal: 16, paddingVertical: 12, marginTop: 24 }}>
+          <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 13, color: '#8B98A5', textTransform: 'uppercase', letterSpacing: 0.5 }}>Connected Apps</Text>
+        </View>
+
+        {/* Connected Apps Items */}
+        {connectedApps.map((item, idx) => (
+          <View
+            key={idx}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              paddingHorizontal: 16,
+              paddingVertical: 14,
+              borderBottomWidth: idx !== connectedApps.length - 1 ? 0.5 : 0,
+              borderBottomColor: '#333333'
+            }}
+          >
+            <Feather name={item.icon} size={20} color="#1D9BF0" style={{ marginRight: 12 }} />
+            <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 16, color: '#FFFFFF', flex: 1 }}>{item.label}</Text>
+          </View>
+        ))}
+
+        {/* Recent Logins Section Header */}
+        <View style={{ paddingHorizontal: 16, paddingVertical: 12, marginTop: 24 }}>
+          <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 13, color: '#8B98A5', textTransform: 'uppercase', letterSpacing: 0.5 }}>Recent Logins</Text>
+        </View>
+
+        {/* Recent Logins Items */}
+        {recentLogins.map((item, idx) => (
+          <View
+            key={idx}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              paddingHorizontal: 16,
+              paddingVertical: 14,
+              borderBottomWidth: idx !== recentLogins.length - 1 ? 0.5 : 0,
+              borderBottomColor: '#333333'
+            }}
+          >
+            <Feather name={item.icon} size={20} color="#1D9BF0" style={{ marginRight: 12 }} />
+            <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 16, color: '#FFFFFF', flex: 1 }}>{item.label}</Text>
+          </View>
+        ))}
+
+        {/* Logout Button */}
+        <TouchableOpacity
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: 16,
+            marginHorizontal: 16,
+            marginTop: 32,
+            paddingVertical: 14,
+            backgroundColor: 'transparent',
+            borderWidth: 1,
+            borderColor: '#1D9BF0'
+          }}
+          onPress={() => setShowLogoutModal(true)}
+          activeOpacity={0.8}
+        >
+          <Feather name="log-out" size={18} color="#1D9BF0" style={{ marginRight: 8 }} />
+          <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 16, textAlign: 'center', color: '#1D9BF0' }}>Sign Out</Text>
+        </TouchableOpacity>
+      </ScrollView>
+
+      {/* Logout Confirmation Modal - Twitter X Style */}
+      <Modal
+        visible={showLogoutModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowLogoutModal(false)}
+      >
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.8)' }}>
+          <View style={{ backgroundColor: '#000000', borderRadius: 16, padding: 24, alignItems: 'center', width: 320, borderWidth: 1, borderColor: '#333333', shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 20, shadowOffset: { width: 0, height: 10 }, elevation: 20 }}>
+            <View style={{ backgroundColor: '#1D9BF0', borderRadius: 50, padding: 16, marginBottom: 16 }}>
+              <Feather name="log-out" size={24} color="#FFFFFF" />
+            </View>
+            <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 18, color: '#FFFFFF', marginBottom: 8, textAlign: 'center' }}>Sign Out</Text>
+            <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 14, color: '#8B98A5', marginBottom: 24, textAlign: 'center', lineHeight: 20 }}>Are you sure you want to sign out of your CloudStore account?</Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'center', width: '100%', gap: 12 }}>
+              <TouchableOpacity
+                style={{ backgroundColor: 'transparent', borderRadius: 20, paddingVertical: 12, paddingHorizontal: 24, flex: 1, alignItems: 'center', borderWidth: 1, borderColor: '#333333' }}
+                onPress={() => setShowLogoutModal(false)}
+                activeOpacity={0.8}
+              >
+                <Text style={{ color: '#FFFFFF', fontFamily: 'Inter_700Bold', fontSize: 15 }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{ backgroundColor: '#1D9BF0', borderRadius: 20, paddingVertical: 12, paddingHorizontal: 24, flex: 1, alignItems: 'center' }}
+                onPress={async () => {
+                  setShowLogoutModal(false);
+                  await logout();
+                  navigation.getParent()?.reset({ index: 0, routes: [{ name: 'Onboarding' }] });
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={{ color: '#FFFFFF', fontFamily: 'Inter_700Bold', fontSize: 15 }}>Sign Out</Text>
               </TouchableOpacity>
             </View>
-          <View style={styles.accountInfoSectionSmallPadding}>
-            <Text style={styles.accountCaption}>Welcome to your CloudStore profile</Text>
-            <Text style={styles.accountDescription}>Manage your account, upgrade your plan, and keep your files safe and accessible from anywhere.</Text>
           </View>
         </View>
-        <View style={styles.singleCard}>
-          <Text style={styles.cardTitle}>Your Plan</Text>
-          <View style={styles.planCardRow}>
-                  <Feather name="award" size={22} color="#0061FF" style={styles.planIcon} />
-            <Text style={styles.planBadge}>{user.plan}</Text>
-                </View>
-              </View>
-        <View style={styles.singleCard}>
-          <Text style={styles.cardTitle}>Your Storage</Text>
-          <View style={styles.storageBarBg}>
-            <View style={[styles.storageBarFill, { width: '0.2%' }]} />
-                </View>
-          <Text style={styles.storageValueText}>{user.storage}</Text>
-          <TouchableOpacity style={styles.upgradeBtnWide} activeOpacity={0.85} onPress={() => navigation.navigate('ManagePlan')}>
-                  <Text style={styles.upgradeBtnText}>Upgrade</Text>
-                </TouchableOpacity>
-              </View>
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>Security</Text>
-          {securityOptions.map((item, idx) => (
-            <TouchableOpacity
-              key={idx}
-              style={styles.sectionRow}
-              activeOpacity={0.85}
-              onPress={() => {
-                if (item.label === 'Change password') navigation.navigate('ChangePassword');
-                if (item.label === 'Two-factor authentication') navigation.navigate('TwoFactor');
-              }}
-            >
-              <Feather name={item.icon} size={20} color="#0061FF" style={styles.sectionIcon} />
-              <Text style={styles.sectionLabel}>{item.label}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>Connected apps</Text>
-          {connectedApps.map((item, idx) => {
-            let iconColor = '#888';
-            if (item.label.toLowerCase().includes('github')) iconColor = '#181717';
-            if (item.label.toLowerCase().includes('slack')) iconColor = '#611f69';
-            return (
-              <View key={idx} style={styles.sectionRow}>
-                <Feather name={item.icon} size={20} color={iconColor} style={styles.sectionIcon} />
-                <Text style={styles.sectionLabel}>{item.label}</Text>
-              </View>
-            );
-          })}
-        </View>
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>Recent logins</Text>
-          {recentLogins.map((item, idx) => (
-            <View key={idx} style={styles.sectionRow}>
-              <Feather name={item.icon} size={20} color="#888" style={styles.sectionIcon} />
-              <Text style={styles.sectionLabel}>{item.label}</Text>
-            </View>
-          ))}
-              </View>
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>Keep work moving</Text>
-          <View style={styles.sectionRow}>
-            <Feather name="help-circle" size={20} color="#0061FF" style={styles.sectionIcon} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.sectionLabel}>Try more ways to keep your files safe, secure, and easily accessible from your devices.</Text>
-            </View>
-          </View>
-        </View>
-      <TouchableOpacity
-        style={styles.logoutBtn}
-        onPress={async () => {
-          await logout();
-            navigation.getParent()?.reset({ index: 0, routes: [{ name: 'Onboarding' }] });
-        }}
-        activeOpacity={0.85}
-      >
-          <LogoutSVG width={32} height={32} style={{ marginRight: 8 }} />
-        <Text style={styles.logoutText}>Log Out</Text>
-      </TouchableOpacity>
-      </ScrollView>
+      </Modal>
     </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  gradientContainer: {
+    flex: 1,
+  },
   container: {
     flex: 1,
-    backgroundColor: '#fff',
-    paddingTop: 20,
-  },
-  illustrationWrap: {
-    alignItems: 'center',
-    marginTop: 18,
-    marginBottom: 8,
-  },
-  topRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    marginBottom: 24,
-  },
-  avatarWrap: {
-    position: 'relative',
-    marginRight: 16,
-  },
-  avatarCircle: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#eee',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#0061FF',
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
-  },
-  editAvatar: {
-    position: 'absolute',
-    bottom: 0,
-    right: 0,
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#ccc',
-    padding: 2,
-    shadowColor: '#0061FF',
-    shadowOpacity: 0.08,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
-  },
-  name: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#0061FF',
-    fontFamily: 'System',
-  },
-  email: {
-    fontSize: 15,
-    color: '#888',
-    fontWeight: '400',
-    fontFamily: 'System',
-  },
-  settingsIconWrap: {
-    marginLeft: 10,
-    padding: 6,
-  },
-  cardRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    marginBottom: 24,
-  },
-  planBox: {
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    padding: 16,
-    marginRight: 8,
-    flex: 1,
-    shadowColor: '#0061FF',
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
-    alignItems: 'center',
-  },
-  planIconRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  planIcon: {
-    marginRight: 8,
-  },
-  planBadge: {
-    backgroundColor: '#f6f8fc',
-    color: '#0061FF',
-    borderRadius: 10,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    fontWeight: 'bold',
-    fontSize: 13,
-    marginLeft: 2,
-  },
-  planLabel: {
-    fontSize: 13,
-    color: '#aaa',
-    fontWeight: '400',
-    fontFamily: 'System',
-  },
-  planName: {
-    fontSize: 16,
-    color: '#222',
-    fontWeight: 'bold',
-    fontFamily: 'System',
-  },
-  storageBox: {
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    padding: 16,
-    marginLeft: 8,
-    flex: 1,
-    shadowColor: '#0061FF',
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
-    alignItems: 'center',
-  },
-  storageCircleWrap: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-  },
-  storageCircleBg: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#f6f8fc',
-    position: 'absolute',
-    top: 0,
-    left: 0,
-  },
-  storageCircleFg: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    borderWidth: 3,
-    borderColor: '#0061FF',
-    position: 'absolute',
-    top: 0,
-    left: 0,
-  },
-  storageCircleText: {
-    fontSize: 13,
-    color: '#0061FF',
-    fontWeight: 'bold',
-    fontFamily: 'System',
-    textAlign: 'center',
-    marginTop: 14,
-  },
-  storageLabel: {
-    fontSize: 13,
-    color: '#aaa',
-    fontWeight: '400',
-    fontFamily: 'System',
-  },
-  storageValue: {
-    fontSize: 16,
-    color: '#222',
-    fontWeight: 'bold',
-    fontFamily: 'System',
-    marginBottom: 8,
-  },
-  upgradeBtn: {
-    backgroundColor: '#0061FF',
-    borderRadius: 14,
-    paddingVertical: 8,
-    paddingHorizontal: 18,
-    marginTop: 6,
-    alignItems: 'center',
-    shadowColor: '#0061FF',
-    shadowOpacity: 0.12,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
-  },
-  upgradeBtnText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 15,
-    fontFamily: 'System',
-  },
-  sectionCard: {
-    backgroundColor: '#fff',
-    borderRadius: 24,
-    marginHorizontal: 16,
-    marginBottom: 18,
-    padding: 20,
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
-  },
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    fontFamily: 'System',
-    color: '#222',
-    marginBottom: 8,
-  },
-  sectionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    marginBottom: 10,
-    padding: 12,
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
-  },
-  sectionIcon: {
-    marginRight: 10,
-  },
-  sectionLabel: {
-    fontSize: 16,
-    color: '#222',
-    fontWeight: 'bold',
-    fontFamily: 'System',
-  },
-  logoutBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'absolute',
-    bottom: 20,
-    left: 20,
-    right: 20,
-    backgroundColor: '#0061FF',
-    borderRadius: 16,
-    paddingVertical: 16,
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
-  },
-  logoutText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 18,
-    fontFamily: 'System',
+    backgroundColor: 'transparent',
   },
   scrollContent: {
-    paddingBottom: 60,
-    paddingTop: 10,
+    paddingBottom: 80,
+    paddingTop: 8,
   },
-  bannerImage: {
-    width: '100%',
-    height: 110,
-    borderBottomLeftRadius: 18,
-    borderBottomRightRadius: 18,
-    marginBottom: 0,
-  },
-  avatarCircleImg: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#eee',
+  topBar: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
-  },
-  accountInfoSection: {
-    alignItems: 'center',
-    marginBottom: 18,
-    marginTop: -8,
-    paddingHorizontal: 18,
-  },
-  accountCaption: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#0061FF',
-    marginBottom: 6,
-    textAlign: 'center',
-  },
-  accountDescription: {
-    fontSize: 15,
-    color: '#444',
-    textAlign: 'center',
+    justifyContent: 'flex-end',
+    height: 56,
+    borderBottomWidth: 0,
+    paddingHorizontal: 16,
     marginBottom: 2,
   },
-  profileCard: {
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    marginHorizontal: 16,
-    marginBottom: 18,
-    padding: 18,
-    alignItems: 'center',
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
+  settingsIconWrap: {
+    padding: 4,
+    borderRadius: 20,
+    backgroundColor: 'rgba(41,121,255,0.12)',
+  },
+  glassCard: {
+    backgroundColor: '#18213a',
+    borderRadius: 28,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)', // Fallback since this style is unused
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
     shadowOffset: { width: 0, height: 8 },
     elevation: 8,
+    marginHorizontal: 16,
+    marginBottom: 24,
+    padding: 24,
+    width: '95%',
+    alignSelf: 'center',
+    overflow: 'hidden',
+  },
+  // Revert profileCard and avatar to original dominant style
+  profileCard: {
+    flexDirection: 'row',
+    gap: 18,
+    alignItems: 'center',
+    marginBottom: 32,
+    paddingVertical: 36,
+  },
+  profileImageWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   avatarCircleImgWrap: {
     position: 'relative',
-    marginRight: 16,
+    marginBottom: 0,
+  },
+  avatarCircleImg: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    borderWidth: 3,
+    borderColor: '#2979FF', // Fallback since this style is unused
+    backgroundColor: '#1a237e',
   },
   editAvatarOverlay: {
     position: 'absolute',
     bottom: 0,
     right: 0,
-    backgroundColor: '#0061FF',
-    borderRadius: 12,
-    padding: 2,
+    borderRadius: 18,
+    padding: 8,
     borderWidth: 2,
-    borderColor: '#fff',
-    elevation: 2,
+    backgroundColor: '#2979FF', // Fallback since this style is unused
+    borderColor: 'rgba(20,40,80,0.32)', // Fallback since this style is unused
   },
-  groupCard: {
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    marginHorizontal: 16,
-    marginBottom: 18,
-    padding: 18,
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
+  profileTextWrap: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+    gap: 4,
   },
-  groupTitle: {
-    fontSize: 17,
+  name: {
+    fontSize: 22,
     fontWeight: 'bold',
-    color: '#0061FF',
-    marginBottom: 10,
-    marginLeft: 2,
-  },
-  largePhotoIllustration: {
-    width: '100%',
-    height: 180,
-    borderBottomLeftRadius: 18,
-    borderBottomRightRadius: 18,
-    marginBottom: 0,
-  },
-  profileCardSmallPadding: {
-    backgroundColor: '#fff',
-    borderRadius: 24,
-    marginHorizontal: 16,
-    marginTop: 12,
-    marginBottom: 10,
-    padding: 14,
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
-  },
-  topRowSmallPadding: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 6,
-    marginBottom: 14,
-  },
-  accountInfoSectionSmallPadding: {
-    marginTop: 2,
     marginBottom: 2,
-    paddingHorizontal: 2,
+    textAlign: 'left',
+    color: '#fff', // Fallback since this style is unused
   },
-  singleCard: {
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    marginHorizontal: 16,
-    marginBottom: 12,
-    padding: 18,
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
-  },
-  cardTitle: {
-    fontSize: 17,
-    fontWeight: 'bold',
-    color: '#0061FF',
+  email: {
+    fontSize: 14,
     marginBottom: 8,
+    textAlign: 'left',
+    color: '#e0e6f0', // Fallback since this style is unused
   },
-  planCardRow: {
+  planStorageCard: {
+    marginBottom: 14,
+    paddingBottom: 10,
+  },
+  planRow: {
     flexDirection: 'row',
     alignItems: 'center',
-  },
-  storageBarBg: {
-    width: '100%',
-    height: 10,
-    backgroundColor: '#f0f4fa',
-    borderRadius: 6,
+    justifyContent: 'space-between',
     marginBottom: 8,
-    marginTop: 2,
-    overflow: 'hidden',
   },
-  storageBarFill: {
-    height: 10,
-    backgroundColor: '#0061FF',
-    borderRadius: 6,
-  },
-  storageValueText: {
+  planLabel: {
     fontSize: 15,
-    color: '#222',
     fontWeight: 'bold',
-    marginBottom: 8,
-    marginTop: 2,
+    color: '#fff', // Fallback since this style is unused
   },
-  upgradeBtnWide: {
-    backgroundColor: '#0061FF',
-    borderRadius: 14,
-    paddingVertical: 10,
+  upgradeBtn: {
+    backgroundColor: '#fff', // Fallback since this style is unused
+    borderRadius: 24,
+    paddingVertical: 12,
+    paddingHorizontal: 28,
+    flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 4,
+    shadowColor: '#2979FF', // Fallback since this style is unused
+    shadowOpacity: 0.10,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  upgradeBtnText: {
+    color: '#2979FF', // Fallback since this style is unused
+    fontWeight: 'bold',
+    fontSize: 17,
+  },
+  storageText: {
+    color: '#e0e6f0', // Fallback since this style is unused
+    fontSize: 16,
+    marginTop: 6,
+    fontWeight: '500',
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    color: '#fff', // Fallback since this style is unused
+    fontFamily: 'Inter_700Bold',
+    textAlign: 'left',
+  },
+  specsRow: {
+    flexDirection: 'column',
+    gap: 8,
+  },
+  specCard: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 22,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.18)',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    marginHorizontal: 2,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
+    backgroundColor: 'rgba(20,40,80,0.32)',
+  },
+  specIcon: {
+    marginBottom: 10,
+  },
+  specLabel: {
+    fontSize: 16,
+    color: '#fff', // Fallback since this style is unused
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+  logoutBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 22,
+    marginHorizontal: 18,
+    marginTop: 12,
+    paddingVertical: 10,
+    backgroundColor: '#2979FF', // Fallback since this style is unused
+    shadowColor: '#2979FF', // Fallback since this style is unused
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 4,
+    width: '95%',
+    alignSelf: 'center',
+  },
+  logoutText: {
+    fontWeight: 'bold',
+    fontSize: 16,
+    textAlign: 'center',
+    color: '#fff', // Fallback since this style is unused
+    fontFamily: 'Inter_700Bold',
+  },
+  // Modal Styles
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(10,10,20,0.7)',
+  },
+  modalCard: {
+    borderRadius: 28,
+    padding: 32,
+    width: '85%',
+    maxWidth: 360,
+    alignItems: 'center',
+    backgroundColor: 'rgba(20,40,80,0.32)', // Fallback since this style is unused
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)', // Fallback since this style is unused
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 12,
+  },
+  modalIconContainer: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+    backgroundColor: '#2979FF', // Fallback since this style is unused
+  },
+  modalTitle: {
+    fontSize: 23,
+    fontWeight: 'bold',
+    marginBottom: 12,
+    textAlign: 'center',
+    color: '#fff', // Fallback since this style is unused
+  },
+  modalMessage: {
+    fontSize: 17,
+    textAlign: 'center',
+    marginBottom: 28,
+    lineHeight: 24,
+    color: '#e0e6f0', // Fallback since this style is unused
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 16,
+    width: '100%',
+  },
+  modalButton: {
+    flex: 1,
+    borderRadius: 18,
+    paddingVertical: 16,
+    paddingHorizontal: 22,
+    alignItems: 'center',
+    borderWidth: 0,
+  },
+  modalButtonCancel: {
+    backgroundColor: '#23272f',
+  },
+  modalButtonConfirm: {
+    backgroundColor: '#2979FF', // Fallback since this style is unused
+  },
+  modalButtonText: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: '#fff', // Fallback since this style is unused
+  },
+  // New styles for outerGlassCard and innerGlassPad
+  outerGlassCard: {
+    borderRadius: 36,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.18)',
+    padding: 32,
+    marginHorizontal: 16,
+    marginBottom: 24,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12,
+    backgroundColor: 'transparent',
+  },
+  innerGradientPad: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 999, // Perfect pill/oval for the light glow
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.18)',
+    paddingVertical: 28,
+    paddingHorizontal: 16,
+    marginHorizontal: 4,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
   },
 }); 

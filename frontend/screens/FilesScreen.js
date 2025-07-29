@@ -1,22 +1,39 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, SectionList, Modal, TouchableWithoutFeedback, Alert, SafeAreaView, FlatList, ScrollView, Image, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, SectionList, Modal, TouchableWithoutFeedback, Alert, SafeAreaView, FlatList, ScrollView, Image, ActivityIndicator, Animated, RefreshControl, Platform, Linking } from 'react-native';
 import Feather from 'react-native-vector-icons/Feather';
 import * as DocumentPicker from 'expo-document-picker';
-import { uploadFiles, searchFiles, createFolder, listFiles } from './api';
+import { uploadFiles, searchFiles, createFolder, listFiles, listFolders, API_BASE_URL, renameFile, favoriteFile, deleteFile, downloadFile, getDownloadUrl, deleteFolder, renameFolder } from './api';
 import { useNavigation } from '@react-navigation/native';
 import MyFilesSVG from '../assets/images/undraw_my-files_1xwx.svg';
 import UploadSVG from '../assets/images/undraw_upload_cucu.svg';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import FileItem from './FileItem';
+import FolderItem from './FolderItem';
+import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+import * as MediaLibrary from 'expo-media-library';
+import { useTheme } from '../theme/ThemeContext';
+import { LinearGradient } from 'expo-linear-gradient';
+import { BlurView } from 'expo-blur';
+import { Text as RNText, TextInput as RNTextInput } from 'react-native';
+
+RNText.defaultProps = RNText.defaultProps || {};
+RNText.defaultProps.style = [{ fontFamily: 'Inter' }];
+RNTextInput.defaultProps = RNTextInput.defaultProps || {};
+RNTextInput.defaultProps.style = [{ fontFamily: 'Inter' }];
 
 const folders = [];
 const categories = [
   { key: 'all', label: 'All' },
   { key: 'favourites', label: 'Favourites' },
-  { key: 'deleted', label: 'Recently Deleted' },
+  { key: 'folders', label: 'Folders' },
+  { key: 'scanned', label: 'Scanned Documents' },
+  { key: 'compressed', label: 'Compressed Files' },
 ];
 const files = [];
 const recentlyDeleted = [];
+const scannedDocuments = [];
 
 const sections = [
   {
@@ -30,13 +47,27 @@ const sections = [
     key: 'files',
   },
   {
-    title: 'Recently deleted',
+    title: 'Scanned Documents',
+    data: scannedDocuments.length ? scannedDocuments : [{}],
+    key: 'scanned',
+  },
+  {
+    title: 'Compressed Files',
     data: recentlyDeleted.length ? recentlyDeleted : [{}],
-    key: 'deleted',
+    key: 'compressed',
   },
 ];
 
+// Helper for breadcrumbs - now uses actual folder path
+const getBreadcrumbs = (folderPath) => {
+  // Only show folder path, not 'All Files'
+  return folderPath.map(folder => folder.name);
+};
+
+// DEEP_BLUE_GRADIENT moved to theme constants
+
 export default function FilesScreen() {
+  const { theme, constants } = useTheme();
   const [menuFileId, setMenuFileId] = useState(null);
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
   const menuButtonRefs = useRef({});
@@ -45,8 +76,10 @@ export default function FilesScreen() {
   const [newFolderName, setNewFolderName] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [fileList, setFileList] = useState(files);
+  const [scannedDocuments, setScannedDocuments] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [currentFolderId, setCurrentFolderId] = useState(null);
+  const [folderPath, setFolderPath] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState(null);
   const [sortModalVisible, setSortModalVisible] = useState(false);
@@ -54,7 +87,32 @@ export default function FilesScreen() {
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [menuType, setMenuType] = useState(null);
   const [selectedItem, setSelectedItem] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [showRenameModal, setShowRenameModal] = useState(false);
+  const [renameItem, setRenameItem] = useState(null);
+  const [newName, setNewName] = useState('');
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [successMessage, setSuccessMessage] = useState('');
+  const [showDownloadModal, setShowDownloadModal] = useState(false);
+  const [downloadItem, setDownloadItem] = useState(null);
+  const [showCompressModal, setShowCompressModal] = useState(false);
+  const [compressItem, setCompressItem] = useState(null);
+  const [compressionSettings, setCompressionSettings] = useState({
+    quality: 'medium',
+    format: 'zip',
+    level: 'balanced'
+  });
+  const [compressing, setCompressing] = useState(false);
+  const [showUploadSuccess, setShowUploadSuccess] = useState(false);
+  const [uploadSuccessType, setUploadSuccessType] = useState('');
+  const uploadSuccessScale = useRef(new Animated.Value(0)).current;
   const navigation = useNavigation();
+  const [showPropertiesModal, setShowPropertiesModal] = useState(false);
+  const [propertiesItem, setPropertiesItem] = useState(null);
+  // Add state for document picking
+  const [isPickingDocument, setIsPickingDocument] = useState(false);
 
   const handleMenuPress = (item, type) => {
     if (menuButtonRefs.current[item.id]) {
@@ -76,28 +134,196 @@ export default function FilesScreen() {
     setSelectedItem(null);
   };
 
-  const handleMenuAction = (action, item, type) => {
+  const handleMenuAction = async (action, item, type) => {
     closeMenu();
+    let token = null;
+    try {
+      token = await AsyncStorage.getItem('jwt');
+    } catch {}
+    
+    if (!token) {
+      Alert.alert('Error', 'Authentication required');
+      return;
+    }
+
+    try {
     if (type === 'file') {
-      if (action === 'preview') Alert.alert('Preview', `Preview file: ${item.name}`);
-      else if (action === 'download') Alert.alert('Download', `Download file: ${item.name}`);
-      else if (action === 'rename') Alert.alert('Rename', `Rename file: ${item.name}`);
-      else if (action === 'delete') Alert.alert('Delete', `Delete file: ${item.name}`);
-      else if (action === 'restore') Alert.alert('Restore', `Restore file: ${item.name}`);
-      else if (action === 'move') Alert.alert('Move', `Move file: ${item.name}`);
-      else if (action === 'copy') Alert.alert('Copy', `Copy file: ${item.name}`);
-      else if (action === 'share') Alert.alert('Share', `Share file: ${item.name}`);
-      else if (action === 'favorite') Alert.alert('Favorite', `Favorite file: ${item.name}`);
-      else if (action === 'unfavorite') Alert.alert('Unfavorite', `Unfavorite file: ${item.name}`);
+        if (action === 'open') {
+          handleFilePress(item);
+        } else if (action === 'rename') {
+          setRenameItem(item);
+          setNewName(item.name);
+          setShowRenameModal(true);
+        } else if (action === 'download') {
+          try {
+            Alert.alert('Download', 'Getting download URL...');
+            const res = await getDownloadUrl(token, item.id);
+            if (res.success) {
+              // Get the file URL from the response
+              const fileUrl = res.data.url;
+              if (!fileUrl) {
+                Alert.alert('Error', 'No download URL available');
+                return;
+              }
+
+              // Ask user where they want to save the file
+              Alert.alert(
+                'Save File',
+                'Where would you like to save this file?',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  { 
+                    text: 'Downloads Folder', 
+                    onPress: () => downloadToDownloads(fileUrl, item.name)
+                  },
+                  { 
+                    text: 'Choose Location', 
+                    onPress: () => downloadToCustomLocation(fileUrl, item.name)
+                  }
+                ]
+              );
+            } else {
+              Alert.alert('Error', res.error || 'Failed to download file');
+            }
+          } catch (err) {
+            console.error('Download error:', err);
+            Alert.alert('Error', 'Failed to download file: ' + err.message);
+          }
+        } else if (action === 'share') {
+          try {
+            // Use the file's URL directly since files are stored on Cloudinary
+            const fileUrl = item.url;
+            
+            console.log('Item object:', item);
+            console.log('File URL for sharing:', fileUrl);
+            
+            if (!fileUrl) {
+              Alert.alert('Error', 'No shareable URL available');
+              return;
+            }
+            
+            if (await Sharing.isAvailableAsync()) {
+              try {
+                // Always download the file to cache first since expo-sharing only supports local files
+                const fileName = item.name;
+                const fileExtension = fileName.includes('.') ? fileName.split('.').pop() : '';
+                const baseName = fileName.includes('.') ? fileName.substring(0, fileName.lastIndexOf('.')) : fileName;
+                const uniqueFileName = `${baseName}_${Date.now()}${fileExtension ? '.' + fileExtension : ''}`;
+                
+                const cacheDir = FileSystem.cacheDirectory + 'Shares/';
+                const cacheFileUri = cacheDir + uniqueFileName;
+                
+                console.log('Cache directory:', cacheDir);
+                console.log('Cache file URI:', cacheFileUri);
+                console.log('File name:', fileName);
+                console.log('Unique file name:', uniqueFileName);
+                
+                const dirInfo = await FileSystem.getInfoAsync(cacheDir);
+                console.log('Directory exists:', dirInfo.exists);
+                
+                if (!dirInfo.exists) {
+                  console.log('Creating directory...');
+                  await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true });
+                  console.log('Directory created successfully');
+                }
+                
+                console.log('Starting download from:', fileUrl);
+                console.log('Downloading to:', cacheFileUri);
+                
+                const downloadResult = await FileSystem.downloadAsync(fileUrl, cacheFileUri);
+                
+                console.log('Download result:', downloadResult);
+                console.log('Download status code:', downloadResult.statusCode);
+                console.log('Download status:', downloadResult.status);
+                
+                if (downloadResult.statusCode === 200 || downloadResult.status === 200) {
+                  console.log('File downloaded successfully, sharing:', cacheFileUri);
+                  await Sharing.shareAsync(cacheFileUri, {
+                    dialogTitle: `Share ${item.name}`,
+                  });
+                } else {
+                  console.error('Download failed with status:', downloadResult.statusCode || downloadResult.status);
+                  Alert.alert('Error', `Failed to download file for sharing. Status: ${downloadResult.statusCode || downloadResult.status}`);
+                }
+              } catch (downloadError) {
+                console.error('Download error for sharing:', downloadError);
+                console.error('Error message:', downloadError.message);
+                console.error('Error stack:', downloadError.stack);
+                Alert.alert('Error', 'Failed to prepare file for sharing: ' + downloadError.message);
+              }
+            } else {
+              Alert.alert('Sharing not available', 'Sharing is not available on this device');
+            }
+          } catch (err) {
+            console.error('Share error:', err);
+            console.error('Error message:', err.message);
+            console.error('Error stack:', err.stack);
+            Alert.alert('Error', 'Failed to share file: ' + err.message);
+          }
+        } else if (action === 'delete') {
+          Alert.alert(
+            'Delete File',
+            `Are you sure you want to permanently delete "${item.name}"?`,
+            [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'Delete',
+                style: 'destructive',
+                onPress: async () => {
+                  const res = await deleteFile(token, item.id);
+                  if (res.success) {
+                    Alert.alert('Success', 'File deleted successfully!');
+                    await refreshFiles();
+                  } else {
+                    Alert.alert('Error', res.error || 'Failed to delete file');
+                  }
+                }
+              }
+            ]
+          );
+        } else if (action === 'properties') {
+          setPropertiesItem(item);
+          setShowPropertiesModal(true);
+          return;
+        }
     } else if (type === 'folder') {
-      if (action === 'open') Alert.alert('Open', `Open folder: ${item.name}`);
-      else if (action === 'rename') Alert.alert('Rename', `Rename folder: ${item.name}`);
-      else if (action === 'delete') Alert.alert('Delete', `Delete folder: ${item.name}`);
-      else if (action === 'move') Alert.alert('Move', `Move folder: ${item.name}`);
+      if (action === 'open') {
+        handleFolderPress(item);
+      } else if (action === 'rename') {
+        setRenameItem(item);
+        setNewName(item.name);
+        setShowRenameModal(true);
+      } else if (action === 'delete') {
+        Alert.alert(
+          'Delete Folder',
+          `Are you sure you want to delete "${item.name}" and all its contents?`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Delete',
+              style: 'destructive',
+              onPress: async () => {
+                const res = await deleteFolder(token, item.id);
+                if (res.success) {
+                  Alert.alert('Success', 'Folder deleted successfully!');
+                  await refreshFiles();
+                } else {
+                  Alert.alert('Error', res.error || 'Failed to delete folder');
+                }
+              }
+            }
+          ]
+        );
+      }
+    }
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Something went wrong');
     }
   };
 
   const handleUpload = async () => {
+    if (isPickingDocument) return; // Prevent double-picking
+    setIsPickingDocument(true);
     try {
       const result = await DocumentPicker.getDocumentAsync({
         type: '*/*',
@@ -108,32 +334,172 @@ export default function FilesScreen() {
       const files = result.assets || (result.type === 'success' ? [result] : []);
       if (!files.length) return;
       setUploading(true);
-      const uploadRes = await uploadFiles(token, files, currentFolderId);
+      setUploadProgress(0);
+      
+      console.log('Selected files:', files);
+      
+      // Get JWT token
+      let token = null;
+      try {
+        token = await AsyncStorage.getItem('jwt');
+      } catch {}
+      if (!token) {
+        Alert.alert('Error', 'Authentication required');
       setUploading(false);
-      if (uploadRes.success) {
-        // Optionally show a success prompt
-        await refreshFiles();
+        return;
+      }
+      
+      console.log('JWT token obtained:', token ? 'present' : 'missing');
+      
+      // Use XMLHttpRequest for progress
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${CLOUDINARY_URL}/raw/upload`);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          setUploadProgress(Math.round((event.loaded / event.total) * 100));
+        }
+      };
+      xhr.onload = async () => {
+        setUploading(false);
+        setUploadProgress(0);
+        const data = JSON.parse(xhr.responseText);
+        console.log('Cloudinary response:', data);
+        
+        if (data.secure_url) {
+          console.log('File uploaded to Cloudinary, registering in backend...');
+          // Register file in backend
+          try {
+            const registerData = {
+              name: files[0].name || files[0].fileName || 'upload',
+              url: data.secure_url,
+              folderId: currentFolderId,
+              type: files[0].mimeType || files[0].type,
+              size: files[0].size,
+            };
+            console.log('Registering file with data:', registerData);
+            
+            const registerResponse = await fetch(`${API_BASE_URL}/files/register`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(registerData),
+            });
+            
+            console.log('Backend register response status:', registerResponse.status);
+            const registerResult = await registerResponse.json();
+            console.log('Backend register response:', registerResult);
+            
+            if (registerResponse.ok) {
+              console.log('File registered successfully, refreshing files...');
+              // Refresh files after successful upload
+              await refreshFiles();
+              // Show upload success animation
+              setUploadSuccessType('file');
+              setShowUploadSuccess(true);
+              Animated.spring(uploadSuccessScale, {
+                toValue: 1,
+                useNativeDriver: true,
+                tension: 100,
+                friction: 8,
+              }).start();
+              setTimeout(() => {
+                Animated.timing(uploadSuccessScale, {
+                  toValue: 0,
+                  duration: 200,
+                  useNativeDriver: true,
+                }).start(() => setShowUploadSuccess(false));
+              }, 2000);
+              setSuccessMessage('File uploaded successfully!');
+              setShowSuccessModal(true);
       } else {
-        // Optionally show an error prompt
-        Alert.alert('Upload failed', uploadRes.error || 'Unknown error');
+              console.log('Backend registration failed');
+              Alert.alert('Error', 'Failed to register file in backend');
       }
     } catch (err) {
+            console.log('Error registering file:', err);
+            Alert.alert('Error', 'Failed to register file in backend');
+          }
+        } else {
+          console.log('Cloudinary upload failed:', data);
+          Alert.alert('Error', data.error?.message || 'Upload failed');
+        }
+      };
+      xhr.onerror = () => {
       setUploading(false);
+        setUploadProgress(0);
+        console.log('XHR error occurred');
+        Alert.alert('Upload error', 'Unknown error');
+      };
+      const formData = new FormData();
+      formData.append('file', {
+        uri: files[0].uri,
+        type: files[0].mimeType || files[0].type || 'application/octet-stream',
+        name: files[0].name || files[0].fileName || 'upload',
+      });
+      formData.append('upload_preset', UPLOAD_PRESET);
+      formData.append('resource_type', 'raw'); // Ensure it's treated as a raw file
+      console.log('Sending to Cloudinary...');
+      xhr.send(formData);
+    } catch (err) {
+      setUploading(false);
+      setUploadProgress(0);
+      console.log('Upload error:', err);
       Alert.alert('Upload error', err.message || 'Unknown error');
+    } finally {
+      setIsPickingDocument(false);
     }
   };
 
   const handleScan = () => {
-    Alert.alert('Scan', 'This would open a document scanner.');
+    navigation.navigate('DocumentScanner');
   };
   const handleCreateFolder = () => {
     setShowFolderModal(true);
   };
-  const handleAddFolder = () => {
-    if (newFolderName.trim()) {
-      setFolders([...folders, { id: Date.now().toString(), name: newFolderName.trim() }]);
-      setNewFolderName('');
-      setShowFolderModal(false);
+  const handleAddFolder = async () => {
+    if (!newFolderName || newFolderName.trim() === '') {
+      Alert.alert('Error', 'Please enter a folder name');
+      return;
+    }
+
+    try {
+      const token = await AsyncStorage.getItem('jwt');
+      if (!token) {
+        Alert.alert('Error', 'Authentication required');
+        return;
+      }
+
+      const res = await createFolder(token, newFolderName.trim());
+      if (res.success) {
+        setShowFolderModal(false);
+        setNewFolderName('');
+        // Show folder creation success animation
+        setUploadSuccessType('folder');
+        setShowUploadSuccess(true);
+        Animated.spring(uploadSuccessScale, {
+          toValue: 1,
+          useNativeDriver: true,
+          tension: 100,
+          friction: 8,
+        }).start();
+        setTimeout(() => {
+          Animated.timing(uploadSuccessScale, {
+            toValue: 0,
+            duration: 200,
+            useNativeDriver: true,
+          }).start(() => setShowUploadSuccess(false));
+        }, 2000);
+        setSuccessMessage('Folder created successfully!');
+        setShowSuccessModal(true);
+        // Refresh files to show the new folder
+        await refreshFiles();
+      } else {
+        Alert.alert('Error', res.error || 'Failed to create folder');
+      }
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Failed to create folder');
     }
   };
 
@@ -143,40 +509,198 @@ export default function FilesScreen() {
       setSearchResults(null);
       return;
     }
-    const res = await searchFiles(token, query);
-    if (res.success) {
-      setSearchResults(res.data);
-    } else {
+    
+    try {
+      const token = await AsyncStorage.getItem('jwt');
+      if (!token) return;
+      
+      const res = await searchFiles(token, query);
+      if (res.success) {
+        setSearchResults(res.data);
+      } else {
+        setSearchResults([]);
+      }
+    } catch (err) {
+      console.error('Search error:', err);
       setSearchResults([]);
     }
   };
 
   const CLOUDINARY_URL = 'https://api.cloudinary.com/v1_1/ds5gugfv0';
   const UPLOAD_PRESET = 'EXPO_UPLOAD';
-  const BACKEND_URL = 'http://localhost:8080'; // Change to your backend URL if needed
+
+  // Helper function to download file to Downloads folder
+  const downloadToDownloads = async (fileUrl, fileName) => {
+    try {
+      // Request permissions for media library
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Please grant permission to save files to your device.');
+        return;
+      }
+
+      // Create a unique filename for the download
+      const fileExtension = fileName.includes('.') ? fileName.split('.').pop() : '';
+      const baseName = fileName.includes('.') ? fileName.substring(0, fileName.lastIndexOf('.')) : fileName;
+      const uniqueFileName = `${baseName}_${Date.now()}${fileExtension ? '.' + fileExtension : ''}`;
+      
+      // First download to cache directory
+      const cacheDir = FileSystem.cacheDirectory + 'Downloads/';
+      const cacheFileUri = cacheDir + uniqueFileName;
+      
+      // Create cache directory if it doesn't exist
+      const dirInfo = await FileSystem.getInfoAsync(cacheDir);
+      if (!dirInfo.exists) {
+        await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true });
+      }
+      
+      // Download the file to cache first
+      const downloadResult = await FileSystem.downloadAsync(fileUrl, cacheFileUri, {
+        onProgress: (progress) => {
+          const percent = Math.round((progress.totalBytesWritten / progress.totalBytesExpectedToWrite) * 100);
+          console.log(`Download progress: ${percent}%`);
+        }
+      });
+      
+      if (downloadResult.statusCode === 200 || downloadResult.status === 200) {
+        // Save to device's Downloads folder using MediaLibrary
+        try {
+          const asset = await MediaLibrary.createAssetAsync(cacheFileUri);
+          await MediaLibrary.createAlbumAsync('Downloads', asset, false);
+          
+          Alert.alert(
+            'Download Complete', 
+            `File saved to your device's Downloads folder\n\nFile: "${uniqueFileName}"`,
+            [
+              { text: 'OK', style: 'default' },
+              { 
+                text: 'Open File', 
+                onPress: async () => {
+                  try {
+                    if (await Sharing.isAvailableAsync()) {
+                      await Sharing.shareAsync(cacheFileUri);
+                    } else {
+                      Alert.alert('Sharing not available', 'File has been saved to your device');
+                    }
+                  } catch (err) {
+                    Alert.alert('Error', 'Could not open file');
+                  }
+                }
+              },
+              {
+                text: 'Show in Gallery',
+                onPress: async () => {
+                  try {
+                    await MediaLibrary.openAssetAsync(asset);
+                  } catch (err) {
+                    Alert.alert('Error', 'Could not open file in gallery');
+                  }
+                }
+              }
+            ]
+          );
+        } catch (mediaError) {
+          console.error('MediaLibrary error:', mediaError);
+          // Fallback to cache directory if MediaLibrary fails
+          Alert.alert(
+            'Download Complete', 
+            `File saved to app cache folder\n\nFile: "${uniqueFileName}"`,
+            [
+              { text: 'OK', style: 'default' },
+              { 
+                text: 'Open File', 
+                onPress: async () => {
+                  try {
+                    if (await Sharing.isAvailableAsync()) {
+                      await Sharing.shareAsync(cacheFileUri);
+                    } else {
+                      Alert.alert('Sharing not available', 'File has been saved to your device');
+                    }
+                  } catch (err) {
+                    Alert.alert('Error', 'Could not open file');
+                  }
+                }
+              }
+            ]
+          );
+        }
+      } else {
+        Alert.alert('Error', 'Failed to download file to device');
+      }
+    } catch (err) {
+      console.error('Download error:', err);
+      Alert.alert('Error', 'Failed to download file: ' + err.message);
+    }
+  };
+
+  // Helper function to download file to custom location
+  const downloadToCustomLocation = async (fileUrl, fileName) => {
+    try {
+      // Let user choose where to save the file
+      const result = await DocumentPicker.getDocumentAsync({
+        type: '*/*',
+        copyToCacheDirectory: false,
+        multiple: false,
+        mode: 'import'
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const selectedFile = result.assets[0];
+        const targetUri = selectedFile.uri;
+        
+        // Download the file to the selected location
+        const downloadResult = await FileSystem.downloadAsync(fileUrl, targetUri, {
+          onProgress: (progress) => {
+            const percent = Math.round((progress.totalBytesWritten / progress.totalBytesExpectedToWrite) * 100);
+            console.log(`Download progress: ${percent}%`);
+          }
+        });
+        
+        if (downloadResult.statusCode === 200 || downloadResult.status === 200) {
+          Alert.alert(
+            'Download Complete', 
+            `File saved to your selected location`,
+            [
+              { text: 'OK', style: 'default' },
+              { 
+                text: 'Open File', 
+                onPress: async () => {
+                  try {
+                    if (await Sharing.isAvailableAsync()) {
+                      await Sharing.shareAsync(targetUri);
+                    } else {
+                      Alert.alert('Sharing not available', 'File has been saved to your device');
+                    }
+                  } catch (err) {
+                    Alert.alert('Error', 'Could not open file');
+                  }
+                }
+              }
+            ]
+          );
+        } else {
+          Alert.alert('Error', 'Failed to download file to selected location');
+        }
+      }
+    } catch (err) {
+      console.error('Download error:', err);
+      Alert.alert('Error', 'Failed to download file: ' + err.message);
+    }
+  };
 
   const handleOptionPress = async (option) => {
     setShowUploadModal(false);
     let token = null;
     try {
-      token = await AsyncStorage.getItem('token');
+      token = await AsyncStorage.getItem('jwt');
     } catch {}
     try {
       if (option === 'Create Folder') {
-        Alert.prompt('Create Folder', 'Enter folder name:', async (folderName) => {
-          if (!folderName) return;
-          if (!token) { Alert.alert('Error', 'Not authenticated'); return; }
-          setUploading(true);
-          const res = await createFolder(token, folderName);
-          if (res.success) {
-            Alert.alert('Success', 'Folder created!');
-            setFolders(prev => [...prev, { id: Date.now().toString(), name: folderName }]);
-            // TODO: To sync folders with HomeScreen, use React Context or add a navigation listener to HomeScreen to refresh folders when focused.
-          } else {
-            Alert.alert('Error', res.error || 'Failed to create folder');
-          }
-          setUploading(false);
-        });
+        setShowFolderModal(true);
+        return;
+      }
+      if (option === 'Scan Document') {
+        handleScan();
         return;
       }
       setUploading(true);
@@ -212,58 +736,104 @@ export default function FilesScreen() {
         }
       }
       formData.append('upload_preset', UPLOAD_PRESET);
+      formData.append('resource_type', 'raw'); // Ensure it's treated as a raw file
       try {
         const res = await fetch(`${CLOUDINARY_URL}/raw/upload`, {
           method: 'POST',
           body: formData,
         });
         const data = await res.json();
+        console.log('Cloudinary response in handleOptionPress:', data);
         if (data.secure_url) {
+          console.log('File uploaded to Cloudinary via handleOptionPress, registering in backend...');
           // Register file in backend
           try {
-            await fetch(`${BACKEND_URL}/api/files/register`, {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
+            const registerData = {
                 name: fileAsset.name || fileAsset.fileName || 'upload',
                 url: data.secure_url,
                 folderId: currentFolderId,
                 type: fileAsset.mimeType || fileAsset.type,
                 size: fileAsset.size,
-              }),
+            };
+            console.log('Registering file with data:', registerData);
+            
+            const registerResponse = await fetch(`${API_BASE_URL}/files/register`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(registerData),
             });
+            
+            console.log('Backend register response status:', registerResponse.status);
+            
+            if (registerResponse.ok) {
+              console.log('File registered successfully, refreshing files...');
+              // Refresh files after successful upload
+              await refreshFiles();
+              setSuccessMessage('File uploaded successfully!');
+              setShowSuccessModal(true);
+            } else {
+              console.log('Backend registration failed');
+              Alert.alert('Error', 'Failed to register file in backend');
+            }
           } catch (err) {
+            console.log('Error registering file:', err);
             Alert.alert('Error', 'Failed to register file in backend');
           }
-          // Refresh files
-          const res = await listFiles(token, currentFolderId);
-          if (res && res.success && Array.isArray(res.data)) {
-            setFileList(res.data);
-          }
-          Alert.alert('Success', 'File uploaded!');
         } else {
+          console.log('Cloudinary upload failed:', data);
           Alert.alert('Error', data.error?.message || 'Upload failed');
         }
       } catch (err) {
-        Alert.alert('Error', err.message || 'Upload failed');
+        Alert.alert('Error', 'Upload failed');
       }
       setUploading(false);
     } catch (err) {
       setUploading(false);
-      Alert.alert('Error', err.message || 'Something went wrong');
+      Alert.alert('Error', err.message || 'Unknown error');
     }
   };
 
-  // Filtering logic for categories
-  let filteredFiles = fileList;
-  if (selectedCategory === 'favourites') {
-    filteredFiles = fileList.filter(f => f.favourite);
-  } else if (selectedCategory === 'deleted') {
-    filteredFiles = [];
+  // Filtering logic for categories and search
+  let filteredFiles = searchResults || fileList;
+  let showFolders = selectedCategory === 'all' || selectedCategory === 'folders';
+  
+  console.log('Current fileList:', fileList);
+  console.log('Current scannedDocuments:', scannedDocuments);
+  console.log('Current folders:', folders);
+  console.log('Selected category:', selectedCategory);
+  console.log('Show folders:', showFolders);
+  console.log('Search results:', searchResults);
+  console.log('Search query:', searchQuery);
+  
+  // If there's a search query, use search results and skip category filtering
+  if (searchQuery && searchResults) {
+    // Search results are already filtered, just apply sorting
+  } else {
+    // Apply category filtering only when not searching
+    if (selectedCategory === 'favourites') {
+      const allFiles = [...fileList, ...scannedDocuments];
+      filteredFiles = allFiles.filter(f => f.favourite || f.favorites);
+    } else if (selectedCategory === 'folders') {
+      // For folders tab, we don't need to filter files since we show folders separately
+      filteredFiles = [];
+    } else if (selectedCategory === 'scanned') {
+      // Show scanned documents (PDFs)
+      filteredFiles = scannedDocuments;
+    } else if (selectedCategory === 'compressed') {
+      // Show all files with '_compressed' in the name, including images/videos
+      const allFiles = [...fileList, ...scannedDocuments];
+      filteredFiles = allFiles.filter(f => f.name && f.name.includes('_compressed'));
+    } else if (selectedCategory === 'all') {
+      // Show both regular files and scanned documents
+      filteredFiles = [...fileList, ...scannedDocuments];
+    }
   }
+  
+  console.log('Filtered files:', filteredFiles);
+  
   // Sorting logic
   if (sortOption === 'type') {
     filteredFiles = [...filteredFiles].sort((a, b) => {
@@ -283,6 +853,7 @@ export default function FilesScreen() {
   const menuOptions = [
     { label: 'Upload Picture', icon: 'image' },
     { label: 'Take Photo', icon: 'camera' },
+    { label: 'Scan Document', icon: 'file-plus' },
     { label: 'Upload Document', icon: 'file-text' },
     { label: 'Upload Audio', icon: 'music' },
     { label: 'Upload Video', icon: 'video' },
@@ -293,21 +864,51 @@ export default function FilesScreen() {
     const RADIUS = 110;
     const CENTER = 130;
     const angleStep = (2 * Math.PI) / menuOptions.length;
+    const BUTTON_SIZE = 64; // Reduced from 76
     return (
-      <View style={styles.overlay} pointerEvents="box-none">
-        <View style={styles.wheel}>
+      <View style={[styles.overlay, { backgroundColor: 'rgba(0, 0, 0, 0.4)' }]} pointerEvents="box-none">
+        <View
+          style={[
+            styles.wheel,
+            {
+              backgroundColor: theme.background,
+              shadowColor: '#000',
+              shadowOpacity: 0.3,
+              shadowRadius: 20,
+              shadowOffset: { width: 0, height: 10 },
+              elevation: 15,
+            },
+          ]}
+        >
           {menuOptions.map((opt, i) => {
             const angle = i * angleStep - Math.PI / 2;
-            const x = CENTER + RADIUS * Math.cos(angle) - 32;
-            const y = CENTER + RADIUS * Math.sin(angle) - 32;
+            const x = CENTER + RADIUS * Math.cos(angle) - BUTTON_SIZE / 2;
+            const y = CENTER + RADIUS * Math.sin(angle) - BUTTON_SIZE / 2;
             return (
               <TouchableOpacity
                 key={opt.label}
-                style={[styles.iconButton, { left: x, top: y }]}
+                style={[
+                  styles.iconButton,
+                  {
+                    left: x,
+                    top: y,
+                    width: BUTTON_SIZE,
+                    height: BUTTON_SIZE,
+                    borderRadius: BUTTON_SIZE / 2,
+                    backgroundColor: 'rgba(255,255,255,0.10)',
+                    shadowColor: '#000',
+                    shadowOpacity: 0.2,
+                    shadowRadius: 12,
+                    shadowOffset: { width: 0, height: 6 },
+                    elevation: 8,
+                    borderWidth: 1,
+                    borderColor: '#4a4a4a',
+                  },
+                ]}
                 onPress={() => onPress(opt.label)}
-                activeOpacity={0.8}
+                activeOpacity={0.7}
               >
-                <Feather name={opt.icon} size={32} color="#2563eb" />
+                <Feather name={opt.icon} size={28} color={constants.primaryText} />
               </TouchableOpacity>
             );
           })}
@@ -316,227 +917,716 @@ export default function FilesScreen() {
     );
   }
 
-  useEffect(() => {
     const fetchFiles = async () => {
       let token = null;
       try {
-        token = await AsyncStorage.getItem('token');
+      token = await AsyncStorage.getItem('jwt');
       } catch {}
       if (!token) return;
-      const res = await listFiles(token, currentFolderId);
-      if (res && res.success && Array.isArray(res.data)) {
-        setFileList(res.data);
+    setLoading(true);
+    console.log('Fetching files with token:', token ? 'present' : 'missing');
+    console.log('Current folder ID:', currentFolderId);
+      
+      // Fetch both files and folders
+      const [filesRes, foldersRes] = await Promise.all([
+        listFiles(token, currentFolderId),
+        listFolders(token, currentFolderId)
+      ]);
+      
+      console.log('Files API response:', filesRes);
+      console.log('Folders API response:', foldersRes);
+      
+      if (filesRes && filesRes.success && Array.isArray(filesRes.data)) {
+        console.log('Setting fileList to:', filesRes.data);
+        
+        // Separate scanned documents (PDFs) from regular files
+        const scannedDocs = filesRes.data.filter(file => 
+          file.name && file.name.toLowerCase().endsWith('.pdf')
+        );
+        const regularFiles = filesRes.data.filter(file => 
+          !file.name || !file.name.toLowerCase().endsWith('.pdf')
+        );
+        
+        console.log('Scanned documents found:', scannedDocs.length);
+        console.log('Regular files found:', regularFiles.length);
+        
+        setFileList(regularFiles);
+        setScannedDocuments(scannedDocs);
+      } else {
+        console.log('Files API response was not successful or data is not an array');
+        setFileList([]);
+        setScannedDocuments([]);
       }
-    };
+      
+      if (foldersRes && foldersRes.success && Array.isArray(foldersRes.data)) {
+        console.log('Setting folders to:', foldersRes.data);
+        setFolders(foldersRes.data);
+      } else {
+        console.log('Folders API response was not successful or data is not an array');
+        setFolders([]);
+      }
+      
+    setLoading(false);
+  };
+
+  const refreshFiles = async () => {
+    setRefreshing(true);
+    await fetchFiles();
+    setRefreshing(false);
+  };
+
+  useEffect(() => {
     fetchFiles();
   }, [currentFolderId]);
 
+  const handleRename = async () => {
+    if (!newName || newName.trim() === '') return;
+    
+    let token = null;
+    try {
+      token = await AsyncStorage.getItem('jwt');
+    } catch {}
+    
+    if (!token) {
+      Alert.alert('Error', 'Authentication required');
+      return;
+    }
+
+    try {
+      console.log('Rename item:', renameItem);
+      console.log('Item properties:', {
+        id: renameItem.id,
+        name: renameItem.name,
+        url: renameItem.url,
+        size: renameItem.size,
+        type: renameItem.type
+      });
+      
+      let res;
+      // Check if it's a folder by looking for file-specific properties
+      const isFolder = !renameItem.url && !renameItem.size && !renameItem.type;
+      console.log('Is folder:', isFolder);
+      
+      if (isFolder) {
+        // Rename folder
+        console.log('Renaming folder with ID:', renameItem.id);
+        res = await renameFolder(token, renameItem.id, newName.trim());
+      } else {
+        // Rename file
+        console.log('Renaming file with ID:', renameItem.id);
+        res = await renameFile(token, renameItem.id, newName.trim());
+      }
+      
+      if (res.success) {
+        setShowRenameModal(false);
+        const itemType = isFolder ? 'Folder' : 'File';
+        setSuccessMessage(`${itemType} renamed successfully!`);
+        setShowSuccessModal(true);
+        await refreshFiles();
+      } else {
+        Alert.alert('Error', res.error || 'Failed to rename item');
+      }
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Failed to rename item');
+    }
+  };
+
+  const handleStarPress = async (item) => {
+    let token = null;
+    try {
+      token = await AsyncStorage.getItem('jwt');
+    } catch {}
+    
+    if (!token) {
+      Alert.alert('Error', 'Authentication required');
+      return;
+    }
+
+    try {
+      const res = await favoriteFile(token, item.id);
+      if (res.success) {
+        // Update the local state immediately for better UX
+        setFileList(prevFiles => 
+          prevFiles.map(file => 
+            file.id === item.id 
+              ? { ...file, favourite: !file.favourite, favorites: !file.favorites }
+              : file
+          )
+        );
+        
+        // Also update scanned documents if the item is a scanned document
+        setScannedDocuments(prevScanned => 
+          prevScanned.map(file => 
+            file.id === item.id 
+              ? { ...file, favourite: !file.favourite, favorites: !file.favorites }
+              : file
+          )
+        );
+        
+        // Show success message
+        const action = item.favourite || item.favorites ? 'removed from' : 'added to';
+        setSuccessMessage(`File ${action} favorites!`);
+        setShowSuccessModal(true);
+        
+        // Refresh files to sync with backend
+        await refreshFiles();
+      } else {
+        Alert.alert('Error', res.error || 'Failed to update favorite status');
+      }
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Failed to update favorite status');
+    }
+  };
+
+  const handleFolderPress = (folder) => {
+    console.log('Opening folder:', folder.name, 'ID:', folder.id);
+    
+    // Update current folder ID
+    setCurrentFolderId(folder.id);
+    
+    // Update folder path
+    setFolderPath(prevPath => [...prevPath, {
+      id: folder.id,
+      name: folder.name
+    }]);
+    
+    // Refresh files and folders for this folder
+    refreshFiles();
+  };
+
+  const handleBreadcrumbPress = (index) => {
+    if (index === 0) {
+      // Go to root (All Files)
+      setCurrentFolderId(null);
+      setFolderPath([]);
+    } else {
+      // Go to specific folder in path (subtract 1 because index 0 is "All Files")
+      const folderIndex = index - 1;
+      const newPath = folderPath.slice(0, folderIndex + 1);
+      const targetFolder = newPath[newPath.length - 1];
+      setCurrentFolderId(targetFolder.id);
+      setFolderPath(newPath);
+    }
+    
+    // Refresh files and folders
+    refreshFiles();
+  };
+
+  const handleFilePress = async (file) => {
+    if (file.isCompressed) {
+      if (file.url) {
+        try {
+          // Download the file to cache first
+          const fileName = file.name || 'compressed_file';
+          const cacheUri = FileSystem.cacheDirectory + fileName;
+          const downloadRes = await FileSystem.downloadAsync(file.url, cacheUri);
+          if (await Sharing.isAvailableAsync()) {
+            await Sharing.shareAsync(downloadRes.uri);
+          } else {
+            await Linking.openURL(downloadRes.uri);
+          }
+        } catch (err) {
+          Alert.alert('Error', 'Could not open file in external app.');
+        }
+      } else {
+        Alert.alert('Error', 'No URL available for this file.');
+      }
+      return;
+    }
+    const extension = file.name.split('.').pop().toLowerCase();
+    if (extension === 'pdf') {
+      try {
+        let localUri = file.url;
+        if (!file.url.startsWith('file://')) {
+          const fileName = file.name || 'temp.pdf';
+          const downloadRes = await FileSystem.downloadAsync(file.url, FileSystem.cacheDirectory + fileName);
+          localUri = downloadRes.uri;
+        }
+        await Sharing.shareAsync(localUri, { mimeType: 'application/pdf' });
+      } catch (err) {
+        Alert.alert('Error', 'Could not open PDF in device app.');
+      }
+      return;
+    }
+    // For other file types, use the in-app viewer
+    // Determine the current list of files being shown
+    let currentFiles = filteredFiles;
+    const index = currentFiles.findIndex(f => f.id === file.id);
+    navigation.navigate('FileViewer', { files: currentFiles, initialIndex: index });
+  };
+
   return (
-    <View style={{ flex: 1 }}>
+    <SafeAreaView style={{ flex: 1 }}>
+      <View style={{ flex: 1 }}>
+        {/* Unified background */}
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: theme.background,
+            zIndex: 0,
+          }}
+        />
+        {/* Header Row with All Files and Trash Icon */}
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 18, marginBottom: 10, marginHorizontal: 24 }}>
+          <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 28, color: constants.primaryText, letterSpacing: 0.2 }}>Files</Text>
+        </View>
+        {/* Main content, ensure zIndex: 1 so it's above gradients */}
+        <View style={{ flex: 1, zIndex: 1 }}>
       {/* Spinner overlay when uploading */}
       {uploading && (
-        <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 999, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.6)' }}>
-          <ActivityIndicator size="large" color="#2563eb" />
+        <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 999, justifyContent: 'center', alignItems: 'center', backgroundColor: theme.overlay }}>
+          <ActivityIndicator size="large" color={constants.accent} />
+          {uploadProgress > 0 && (
+            <View style={styles.uploadProgressWrap}>
+              <View style={[styles.uploadProgressBar, { width: `${uploadProgress}%`, backgroundColor: constants.accent }]} />
+              <Text style={[styles.uploadProgressText, { color: constants.primaryText }]}>{uploadProgress}%</Text>
+            </View>
+          )}
         </View>
       )}
-      <SafeAreaView style={styles.container}>
-        <ScrollView contentContainerStyle={{ paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
-          {/* Search Bar */}
-          <View style={styles.searchBarWrap}>
-            <Feather name="search" size={20} color="#888" style={styles.searchIcon} />
+
+      {/* Upload Success Animation */}
+      {showUploadSuccess && (
+        <View style={styles.uploadSuccessOverlay}>
+          <Animated.View 
+            style={[
+              styles.uploadSuccessCard,
+              {
+                transform: [{ scale: uploadSuccessScale }]
+              }
+            ]}
+          >
+            <View style={styles.uploadSuccessIcon}>
+              <Feather 
+                name={uploadSuccessType === 'folder' ? 'folder-plus' : 'upload-cloud'} 
+                size={32} 
+                color="#10b981" 
+              />
+            </View>
+          </Animated.View>
+        </View>
+      )}
+
+        {/* Breadcrumb Navigation */}
+        <View style={styles.breadcrumbWrap}>
+          {getBreadcrumbs(folderPath).map((crumb, idx, arr) => (
+            <View key={idx} style={styles.breadcrumbItem}>
+              <TouchableOpacity disabled={idx === arr.length - 1} onPress={() => handleBreadcrumbPress(idx)}>
+                <Text style={[styles.breadcrumbText, { color: theme.textSecondary }, idx === arr.length - 1 && { color: theme.text }]}>{crumb}</Text>
+              </TouchableOpacity>
+              {idx < arr.length - 1 && <Text style={[styles.breadcrumbSeparator, { color: theme.textSecondary }]}>/</Text>}
+            </View>
+          ))}
+        </View>
+        
+        {/* Current Folder Indicator */}
+        {currentFolderId && (
+          <View style={styles.currentFolderIndicator}>
+            <Feather name="folder" size={16} color={theme.primary} />
+            <Text style={[styles.currentFolderText, { color: theme.textSecondary }]}>
+              Inside: {folderPath[folderPath.length - 1]?.name || 'Folder'}
+            </Text>
+          </View>
+        )}
+        <ScrollView 
+            contentContainerStyle={{ paddingBottom: 120, paddingTop: 0 }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={refreshFiles}
+              colors={[constants.accent]}
+              tintColor={constants.accent}
+            />
+          }
+        >
+            {/* Glassy Search Bar */}
+            <BlurView intensity={60} tint="dark" style={[styles.glassySearchBarWrap, { overflow: 'hidden' }]}> 
+              <Feather name="search" size={20} color={constants.secondaryText} style={styles.searchIcon} />
             <TextInput
-              style={styles.searchInputModern}
-              placeholder="Search"
-              placeholderTextColor="#bbb"
+                style={[styles.glassSearchInput, { color: constants.primaryText, fontFamily: 'Inter_400Regular' }]}
+              placeholder="Search files..."
+                placeholderTextColor={constants.secondaryText}
               value={searchQuery}
               onChangeText={handleSearch}
             />
-          </View>
-          {/* Category Bar */}
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.categoryBar}>
-            {categories.map(cat => (
-              <TouchableOpacity
-                key={cat.key}
-                style={[
-                  styles.categoryButton,
-                  selectedCategory === cat.key && styles.categoryButtonSelected,
-                ]}
-                activeOpacity={0.7}
-                onPress={() => setSelectedCategory(cat.key)}
-              >
-                <Text style={[
-                  styles.categoryButtonText,
-                  selectedCategory === cat.key && styles.categoryButtonTextSelected,
-                ]}>{cat.label}</Text>
-              </TouchableOpacity>
-            ))}
+            </BlurView>
+            {/* Search Results */}
+            {searchQuery && searchResults !== null && (
+              <BlurView intensity={90} tint="dark" style={{ backgroundColor: theme.background, borderRadius: 18, marginHorizontal: 12, marginBottom: 12, padding: 16, shadowColor: '#000', shadowOpacity: 0.10, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 3, overflow: 'hidden', borderWidth: 1, borderColor: constants.glassBorder }}>
+                <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 18, color: constants.primaryText, marginBottom: 10 }}>Search Results</Text>
+                {searchResults.length > 0 ? (
+                  <FlatList
+                    data={searchResults}
+                    keyExtractor={item => item.id?.toString()}
+                    renderItem={({ item }) => (
+                      <FileItem
+                        item={item}
+                        onPress={() => handleFilePress(item)}
+                        onMenuPress={() => handleMenuPress(item, 'file')}
+                        onStarPress={() => handleStarPress(item)}
+                      />
+                    )}
+                  />
+                ) : (
+                  <View style={{ alignItems: 'center', marginTop: 40 }}>
+                    <Image
+                      source={require('../assets/images/Screenshot_20250724-130748.jpg')}
+                      style={{
+                        width: 200,
+                        height: 200,
+                        borderRadius: 16,
+                        marginBottom: 20
+                      }}
+                      resizeMode="cover"
+                    />
+                    <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 18, color: constants.primaryText, textAlign: 'center', marginBottom: 8 }}>No files found</Text>
+                    <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 15, color: constants.secondaryText, textAlign: 'center', maxWidth: 260 }}>
+                      Try adjusting your search or browse different categories.
+                    </Text>
+                  </View>
+                )}
+              </BlurView>
+            )}
+            {/* Category Bar - Modern, Inter font, recreated from scratch */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.segmentBarModern}
+              contentContainerStyle={{ alignItems: 'center', paddingLeft: 18, paddingRight: 8 }}
+            >
+              {categories.map((cat) => (
+                <TouchableOpacity
+                  key={cat.key}
+                  style={{
+                    borderRadius: 999,
+                    borderWidth: selectedCategory === cat.key ? 0 : 1.5,
+                    borderColor: selectedCategory === cat.key ? 'transparent' : constants.accent,
+                    backgroundColor: selectedCategory === cat.key ? constants.accent : 'transparent',
+                    paddingVertical: 8,
+                    paddingHorizontal: 22,
+                    marginRight: 10,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    minWidth: 60,
+                    shadowColor: selectedCategory === cat.key ? constants.accent : 'transparent',
+                    shadowOpacity: selectedCategory === cat.key ? 0.3 : 0,
+                    shadowRadius: selectedCategory === cat.key ? 8 : 0,
+                    shadowOffset: selectedCategory === cat.key ? { width: 0, height: 4 } : { width: 0, height: 0 },
+                    elevation: selectedCategory === cat.key ? 4 : 0,
+                  }}
+                  onPress={() => setSelectedCategory(cat.key)}
+                  activeOpacity={0.7}
+                >
+                  <Text
+                    style={{
+                      fontFamily: 'Inter_700Bold',
+                      fontSize: 16,
+                      color: selectedCategory === cat.key ? constants.primaryText : constants.accent,
+                      letterSpacing: 0.1,
+                    }}
+                  >
+                    {cat.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
           </ScrollView>
           {/* Sort Bar */}
           <View style={styles.sortBar}>
-            <View style={{ flex: 1, height: 2, backgroundColor: '#e0e7ef', borderRadius: 1 }} />
-            <TouchableOpacity style={styles.sortIconBtn} onPress={() => setSortModalVisible(true)}>
-              <Feather name="sliders" size={22} color="#2563eb" />
+            <View style={{ flex: 1, height: 2, backgroundColor: constants.glassBorder, borderRadius: 1 }} />
+            <TouchableOpacity style={[styles.sortIconBtn, { backgroundColor: 'rgba(41,121,255,0.08)', borderColor: constants.accent }]} onPress={() => setSortModalVisible(true)}>
+              <Feather name="sliders" size={22} color={constants.accent} />
             </TouchableOpacity>
           </View>
-          {/* Sort Modal */}
+          {/* Sort Modal - refined to match SettingsScreen confirmation modal */}
           <Modal
             visible={sortModalVisible}
             transparent
             animationType="slide"
             onRequestClose={() => setSortModalVisible(false)}
           >
-            <View style={styles.sortModalOverlay}>
-              <View style={styles.sortModalCard}>
-                <Text style={styles.sortModalTitle}>Sort by</Text>
-                <View style={styles.sortModalDivider} />
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+              {/* Fullscreen BlurView for background blur */}
+              <BlurView intensity={120} tint="dark" style={{ ...StyleSheet.absoluteFillObject, zIndex: 1 }}>
+                <View style={{ flex: 1, backgroundColor: 'rgba(10,10,20,0.55)' }} />
+              </BlurView>
+              {/* Glassy card, more rounded, centered, modern */}
+              <BlurView intensity={90} tint="dark" style={{ backgroundColor: theme.background, borderRadius: 28, padding: 32, alignItems: 'center', width: 320, borderWidth: 1.5, borderColor: constants.glassBorder, zIndex: 2, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 24, shadowOffset: { width: 0, height: 12 }, elevation: 16 }}>
+                <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 20, color: constants.primaryText, marginBottom: 18, textAlign: 'center' }}>Sort by</Text>
                 {['type', 'date', 'size'].map(opt => (
                   <TouchableOpacity
                     key={opt}
-                    style={[styles.sortOptionBtn, sortOption === opt && styles.sortOptionBtnSelected]}
+                    style={{
+                      width: '100%',
+                      paddingVertical: 16,
+                      borderRadius: 16,
+                      marginBottom: 12,
+                      alignItems: 'center',
+                      backgroundColor: sortOption === opt ? constants.accent : 'rgba(255,255,255,0.08)',
+                      borderWidth: sortOption === opt ? 2 : 0,
+                      borderColor: sortOption === opt ? constants.accent : 'transparent',
+                    }}
                     onPress={() => {
                       setSortOption(opt);
                       setSortModalVisible(false);
                     }}
                   >
-                    <Text style={[styles.sortOptionText, sortOption === opt && styles.sortOptionTextSelected]}>{opt.charAt(0).toUpperCase() + opt.slice(1)}</Text>
+                    <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 16, color: sortOption === opt ? constants.primaryText : constants.primaryText, textAlign: 'center' }}>{opt.charAt(0).toUpperCase() + opt.slice(1)}</Text>
                   </TouchableOpacity>
                 ))}
-                <TouchableOpacity style={styles.sortModalCloseBtn} onPress={() => setSortModalVisible(false)}>
-                  <Text style={styles.sortModalCloseText}>Cancel</Text>
+                <TouchableOpacity style={{ marginTop: 8, alignItems: 'center', width: '100%', borderRadius: 16, paddingVertical: 16, backgroundColor: 'rgba(255,255,255,0.08)' }} onPress={() => setSortModalVisible(false)}>
+                  <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 17, color: constants.accent, textAlign: 'center' }}>Cancel</Text>
                 </TouchableOpacity>
-              </View>
+              </BlurView>
             </View>
           </Modal>
-          {/* SVG Illustration */}
-          <View style={styles.uploadIllustrationWrap}>
-            <UploadSVG width={120} height={90} />
-          </View>
-          {/* Folders Grid */}
-          {folders.length > 0 && (
-            <View style={styles.foldersGrid}>
-              {folders.map(folder => (
-                <View key={folder.id} style={styles.folderCardGrid}>
-                  <TouchableOpacity onPress={() => Alert.alert('Open Folder', `Open folder: ${folder.name}`)}>
-                    <Image source={{ uri: 'https://img.icons8.com/color/96/folder-invoices--v2.png' }} style={styles.folderIconImgGrid} />
-                    <Text style={styles.folderNameGrid}>{folder.name}</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    ref={ref => (menuButtonRefs.current[folder.id] = ref)}
-                    style={styles.menuButton}
-                    activeOpacity={0.7}
-                    onPress={() => handleMenuPress(folder, 'folder')}
-                  >
-                    <Feather name="more-vertical" size={22} color="#888" />
-                  </TouchableOpacity>
-                </View>
-              ))}
+          {/* Enhanced Empty State - Only show when no files and no folders and not in folders tab */}
+          {selectedCategory === 'all' && filteredFiles.length === 0 && folders.length === 0 && !loading && (
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', marginTop: 64 }}>
+              <Image
+                source={require('../assets/images/Screenshot_20250724-130748.jpg')}
+                style={{
+                  width: 220,
+                  height: 220,
+                  borderRadius: 16,
+                  marginBottom: 24
+                }}
+                resizeMode="cover"
+              />
+              <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 20, color: constants.primaryText, textAlign: 'center', marginBottom: 8 }}>Upload to get started</Text>
+              <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 15, color: constants.secondaryText, textAlign: 'center', maxWidth: 280 }}>
+                Add your first files to CloudStore and access them anywhere.
+              </Text>
             </View>
+          )}
+          {/* Folders Grid - Only show in 'all' and 'folders' tabs */}
+          {showFolders && (
+            <>
+              {loading ? (
+                <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', marginTop: 64 }}>
+                  <Image
+                    source={require('../assets/images/Screenshot_20250724-130521.jpg')}
+                    style={{
+                      width: 220,
+                      height: 220,
+                      borderRadius: 16,
+                      opacity: 0.7,
+                      marginBottom: 24
+                    }}
+                    resizeMode="cover"
+                  />
+                  <Text style={{
+                    fontFamily: 'Inter_400Regular',
+                    fontSize: 16,
+                    color: constants.secondaryText,
+                    textAlign: 'center'
+                  }}>
+                    Loading your files...
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.foldersGrid}>
+                  {folders.length > 0 ? (
+                    folders.map(folder => (
+                      <FolderItem
+                        key={folder.id}
+                        item={folder}
+                        onPress={() => handleFolderPress(folder)}
+                        onMenuPress={() => handleMenuPress(folder, 'folder')}
+                        textStyle={{ fontFamily: 'Inter_400Regular' }}
+                      />
+                    ))
+                  ) : filteredFiles.length === 0 && !loading && selectedCategory === 'folders' ? (
+                    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', marginTop: 64 }}>
+                      <Image
+                        source={require('../assets/images/Screenshot_20250724-130748.jpg')}
+                        style={{
+                          width: 220,
+                          height: 220,
+                          borderRadius: 16,
+                          marginBottom: 24
+                        }}
+                        resizeMode="cover"
+                      />
+                      <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 20, color: constants.primaryText, textAlign: 'center', marginBottom: 8 }}>No folders yet</Text>
+                      <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 15, color: constants.secondaryText, textAlign: 'center', maxWidth: 280 }}>
+                        Create folders to organize your files better.
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              )}
+            </>
           )}
           {/* Files List */}
-          {filteredFiles.length === 0 ? (
-            <View style={styles.emptyState}>
-              <Text style={styles.emptyText}>No files yet. Upload or create a file to get started!</Text>
+          {loading ? (
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', marginTop: 64 }}>
+              <Image
+                source={require('../assets/images/Screenshot_20250724-130521.jpg')}
+                style={{
+                  width: 220,
+                  height: 220,
+                  borderRadius: 16,
+                  opacity: 0.7,
+                  marginBottom: 24
+                }}
+                resizeMode="cover"
+              />
+              <Text style={{
+                fontFamily: 'Inter_400Regular',
+                fontSize: 16,
+                color: constants.secondaryText,
+                textAlign: 'center'
+              }}>
+                Loading your files...
+              </Text>
+            </View>
+          ) : filteredFiles.length === 0 && selectedCategory === 'favourites' ? (
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', marginTop: 64 }}>
+              <Image
+                source={require('../assets/images/Screenshot_20250724-130748.jpg')}
+                style={{
+                  width: 220,
+                  height: 220,
+                  borderRadius: 16,
+                  marginBottom: 24
+                }}
+                resizeMode="cover"
+              />
+              <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 20, color: constants.primaryText, textAlign: 'center', marginBottom: 8 }}>No favourited files yet</Text>
+              <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 15, color: constants.secondaryText, textAlign: 'center', maxWidth: 280 }}>
+                Tap the star icon on any file to add it to your favourites.
+              </Text>
+            </View>
+          ) : filteredFiles.length === 0 && selectedCategory === 'scanned' ? (
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', marginTop: 64 }}>
+              <Image
+                source={require('../assets/images/Screenshot_20250724-130748.jpg')}
+                style={{
+                  width: 220,
+                  height: 220,
+                  borderRadius: 16,
+                  marginBottom: 24
+                }}
+                resizeMode="cover"
+              />
+              <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 20, color: constants.primaryText, textAlign: 'center', marginBottom: 8 }}>No scanned documents yet</Text>
+              <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 15, color: constants.secondaryText, textAlign: 'center', maxWidth: 280 }}>
+                Use the scanner to add your first document.
+              </Text>
+            </View>
+          ) : filteredFiles.length === 0 && selectedCategory === 'compressed' ? (
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', marginTop: 64 }}>
+              <Image
+                source={require('../assets/images/Screenshot_20250724-130748.jpg')}
+                style={{
+                  width: 220,
+                  height: 220,
+                  borderRadius: 16,
+                  marginBottom: 24
+                }}
+                resizeMode="cover"
+              />
+              <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 20, color: constants.primaryText, textAlign: 'center', marginBottom: 8 }}>No compressed files yet</Text>
+              <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 15, color: constants.secondaryText, textAlign: 'center', maxWidth: 280 }}>
+                Compressed files will appear here when you upload them.
+              </Text>
             </View>
           ) : (
-            filteredFiles.map((item, idx) => {
-              let fileColor = '#888';
-              if (item.name && item.name.toLowerCase().endsWith('.pdf')) fileColor = '#e74c3c';
-              else if (item.name && (item.name.toLowerCase().endsWith('.doc') || item.name.toLowerCase().endsWith('.docx'))) fileColor = '#2563eb';
-              else if (item.name && (item.name.toLowerCase().endsWith('.xls') || item.name.toLowerCase().endsWith('.xlsx'))) fileColor = '#27ae60';
-              else if (item.name && (item.name.toLowerCase().endsWith('.ppt') || item.name.toLowerCase().endsWith('.pptx'))) fileColor = '#e67e22';
-              else if (item.name && (item.name.toLowerCase().endsWith('.jpg') || item.name.toLowerCase().endsWith('.jpeg') || item.name.toLowerCase().endsWith('.png') || item.name.toLowerCase().endsWith('.gif'))) fileColor = '#8e44ad';
-              return (
-                <View key={item.id || idx} style={styles.fileCardRow}>
-                  <View style={styles.fileThumbWrap}>
-                    <Feather name="file-text" size={32} color={fileColor} />
-                  </View>
-                  <View style={{ flex: 1, marginLeft: 12 }}>
-                    <Text style={styles.fileCardName} numberOfLines={1}>{item.name}</Text>
-                    <Text style={styles.fileCardMeta} numberOfLines={1}>{item.source || 'CloudStore'} • {item.size || ''}</Text>
-                  </View>
-                  <TouchableOpacity
-                    ref={ref => (menuButtonRefs.current[item.id] = ref)}
-                    style={styles.menuButton}
-                    activeOpacity={0.7}
-                    onPress={() => handleMenuPress(item, 'file')}
-                  >
-                    <Feather name="more-vertical" size={22} color="#888" />
-                  </TouchableOpacity>
-                </View>
-              );
-            })
+            filteredFiles.map((item, idx) => (
+              <FileItem
+                key={item.id || idx}
+                item={item}
+                onPress={() => handleFilePress(item)}
+                onMenuPress={() => handleMenuPress(item, 'file')}
+                onStarPress={() => handleStarPress(item)}
+              />
+            ))
           )}
         </ScrollView>
-        {/* File/Folder menu modal rendered at root */}
-        {menuFileId && (
-          <View style={[styles.fileMenuModal, { position: 'absolute', left: menuPosition.x - 180, top: menuPosition.y, zIndex: 9999 }]}> 
-            {menuType === 'file' ? (
-              <>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('preview', selectedItem, 'file')}>
-                  <Feather name="eye" size={18} color="#0061FF" style={{ marginRight: 8 }} />
-                  <Text style={styles.fileMenuText}>Preview</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('download', selectedItem, 'file')}>
-                  <Feather name="download" size={18} color="#0061FF" style={{ marginRight: 8 }} />
-                  <Text style={styles.fileMenuText}>Download</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('rename', selectedItem, 'file')}>
-                  <Feather name="edit-3" size={18} color="#0061FF" style={{ marginRight: 8 }} />
-                  <Text style={styles.fileMenuText}>Rename</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('delete', selectedItem, 'file')}>
-                  <Feather name="trash" size={18} color="crimson" style={{ marginRight: 8 }} />
-                  <Text style={[styles.fileMenuText, { color: 'crimson' }]}>Delete</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('move', selectedItem, 'file')}>
-                  <Feather name="folder" size={18} color="#0061FF" style={{ marginRight: 8 }} />
-                  <Text style={styles.fileMenuText}>Move</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('copy', selectedItem, 'file')}>
-                  <Feather name="copy" size={18} color="#0061FF" style={{ marginRight: 8 }} />
-                  <Text style={styles.fileMenuText}>Copy</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('share', selectedItem, 'file')}>
-                  <Feather name="share-2" size={18} color="#0061FF" style={{ marginRight: 8 }} />
-                  <Text style={styles.fileMenuText}>Share</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('favorite', selectedItem, 'file')}>
-                  <Feather name="star" size={18} color="#fbbf24" style={{ marginRight: 8 }} />
-                  <Text style={styles.fileMenuText}>Favorite</Text>
-                </TouchableOpacity>
-              </>
-            ) : (
-              <>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('open', selectedItem, 'folder')}>
-                  <Feather name="folder" size={18} color="#0061FF" style={{ marginRight: 8 }} />
-                  <Text style={styles.fileMenuText}>Open</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('rename', selectedItem, 'folder')}>
-                  <Feather name="edit-3" size={18} color="#0061FF" style={{ marginRight: 8 }} />
-                  <Text style={styles.fileMenuText}>Rename</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('delete', selectedItem, 'folder')}>
-                  <Feather name="trash" size={18} color="crimson" style={{ marginRight: 8 }} />
-                  <Text style={[styles.fileMenuText, { color: 'crimson' }]}>Delete</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.fileMenuItem} onPress={() => handleMenuAction('move', selectedItem, 'folder')}>
-                  <Feather name="arrow-right" size={18} color="#0061FF" style={{ marginRight: 8 }} />
-                  <Text style={styles.fileMenuText}>Move</Text>
-                </TouchableOpacity>
-              </>
-            )}
-            <TouchableOpacity style={styles.fileMenuClose} onPress={closeMenu}>
-              <Text style={styles.fileMenuCloseText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+        {/* Centered File Menu Modal */}
+        <Modal
+          visible={menuFileId !== null}
+          transparent
+          animationType="fade"
+          onRequestClose={closeMenu}
+        >
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            {/* Overlay to close menu when clicking outside */}
+            <TouchableOpacity style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 2 }} activeOpacity={1} onPress={closeMenu} />
+              {/* Fullscreen BlurView for background blur */}
+              <BlurView intensity={120} tint="dark" style={{ ...StyleSheet.absoluteFillObject, zIndex: 1 }}>
+                <View style={{ flex: 1, backgroundColor: 'rgba(10,10,20,0.55)' }} />
+              </BlurView>
+              {/* Glassy card, more rounded, centered, modern */}
+            <BlurView intensity={90} tint="dark" style={{ backgroundColor: theme.background, borderRadius: 28, padding: 32, alignItems: 'center', width: 320, borderWidth: 1.5, borderColor: constants.glassBorder, zIndex: 3, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 24, shadowOffset: { width: 0, height: 12 }, elevation: 16 }}>
+              {menuType === 'file' ? (
+                <>
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, borderRadius: 16, marginBottom: 12, width: '100%', backgroundColor: 'rgba(255,255,255,0.04)' }} onPress={() => handleMenuAction('open', selectedItem, 'file')}>
+                      <Feather name="eye" size={24} color={constants.accent} />
+                      <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 17, color: constants.primaryText, marginLeft: 16, textAlignVertical: 'center', textAlign: 'center' }}>Open</Text>
+                  </TouchableOpacity>
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, borderRadius: 16, marginBottom: 12, width: '100%', backgroundColor: 'rgba(255,255,255,0.04)' }} onPress={() => handleMenuAction('rename', selectedItem, 'file')}>
+                      <Feather name="edit-3" size={24} color={constants.accent} />
+                      <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 17, color: constants.primaryText, marginLeft: 16, textAlignVertical: 'center', textAlign: 'center' }}>Rename</Text>
+                  </TouchableOpacity>
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, borderRadius: 16, marginBottom: 12, width: '100%', backgroundColor: 'rgba(255,255,255,0.04)' }} onPress={() => handleMenuAction('download', selectedItem, 'file')}>
+                      <Feather name="download" size={24} color={constants.accent} />
+                      <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 17, color: constants.primaryText, marginLeft: 16, textAlignVertical: 'center', textAlign: 'center' }}>Download</Text>
+                  </TouchableOpacity>
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, borderRadius: 16, marginBottom: 12, width: '100%', backgroundColor: 'rgba(255,255,255,0.04)' }} onPress={() => handleMenuAction('share', selectedItem, 'file')}>
+                      <Feather name="share-2" size={24} color={constants.accent} />
+                      <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 17, color: constants.primaryText, marginLeft: 16, textAlignVertical: 'center', textAlign: 'center' }}>Share</Text>
+                  </TouchableOpacity>
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, borderRadius: 16, marginBottom: 12, width: '100%', backgroundColor: 'rgba(255,255,255,0.04)' }} onPress={() => handleMenuAction('delete', selectedItem, 'file')}>
+                      <Feather name="trash" size={24} color="#ff4b5c" />
+                      <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 17, color: '#ff4b5c', marginLeft: 16, textAlignVertical: 'center', textAlign: 'center' }}>Delete</Text>
+                  </TouchableOpacity>
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, borderRadius: 16, marginBottom: 0, width: '100%', backgroundColor: 'rgba(255,255,255,0.04)' }} onPress={() => handleMenuAction('properties', selectedItem, 'file')}>
+                      <Feather name="info" size={24} color={constants.accent} />
+                      <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 17, color: constants.primaryText, marginLeft: 16, textAlignVertical: 'center', textAlign: 'center' }}>Properties</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, borderRadius: 16, marginBottom: 12, width: '100%', backgroundColor: 'rgba(255,255,255,0.04)' }} onPress={() => handleMenuAction('open', selectedItem, 'folder')}>
+                      <Feather name="folder-open" size={24} color={constants.accent} />
+                      <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 17, color: constants.primaryText, marginLeft: 16, textAlignVertical: 'center', textAlign: 'center' }}>Open</Text>
+                  </TouchableOpacity>
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, borderRadius: 16, marginBottom: 12, width: '100%', backgroundColor: 'rgba(255,255,255,0.04)' }} onPress={() => handleMenuAction('rename', selectedItem, 'folder')}>
+                      <Feather name="edit-3" size={24} color={constants.accent} />
+                      <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 17, color: constants.primaryText, marginLeft: 16, textAlignVertical: 'center', textAlign: 'center' }}>Rename</Text>
+                  </TouchableOpacity>
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, borderRadius: 16, marginBottom: 0, width: '100%', backgroundColor: 'rgba(255,255,255,0.04)' }} onPress={() => handleMenuAction('delete', selectedItem, 'folder')}>
+                      <Feather name="trash" size={24} color="#ff4b5c" />
+                      <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 17, color: '#ff4b5c', marginLeft: 16, textAlignVertical: 'center', textAlign: 'center' }}>Delete</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+              </BlurView>
+            </View>
+        </Modal>
         {/* Plus Button and Upload Modal */}
         <TouchableOpacity
-          style={styles.plusButton}
+          style={[
+            styles.plusButton,
+            {
+              bottom: 120,
+              backgroundColor: constants.accent,
+              shadowColor: constants.accent,
+              shadowOpacity: 0.3,
+              shadowRadius: 12,
+              shadowOffset: { width: 0, height: 6 },
+            }
+          ]}
           onPress={() => setShowUploadModal(true)}
           activeOpacity={0.85}
         >
-          <Feather name="plus" size={28} color="#fff" />
+          <Feather name="plus" size={28} color={constants.primaryText} />
         </TouchableOpacity>
         <Modal
           visible={showUploadModal}
@@ -544,12 +1634,173 @@ export default function FilesScreen() {
           animationType="fade"
           onRequestClose={() => setShowUploadModal(false)}
         >
-          <TouchableOpacity style={styles.overlay} onPress={() => setShowUploadModal(false)} activeOpacity={1}>
-            <RadialMenu onPress={handleOptionPress} />
-          </TouchableOpacity>
+          <TouchableWithoutFeedback onPress={() => setShowUploadModal(false)}>
+            <BlurView intensity={120} tint="dark" style={[styles.overlay, { backgroundColor: 'rgba(0, 0, 0, 0.4)' }]} pointerEvents="box-none">
+              <RadialMenu onPress={handleOptionPress} />
+            </BlurView>
+          </TouchableWithoutFeedback>
         </Modal>
-      </SafeAreaView>
-    </View>
+
+        {/* Rename Modal */}
+        <Modal
+          visible={showRenameModal}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setShowRenameModal(false)}
+        >
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <BlurView intensity={120} tint="dark" style={{ ...StyleSheet.absoluteFillObject, zIndex: 1 }}>
+              <View style={{ flex: 1, backgroundColor: 'rgba(10,10,20,0.55)' }} />
+            </BlurView>
+            <BlurView intensity={90} tint="dark" style={{ backgroundColor: theme.background, borderRadius: 28, padding: 32, alignItems: 'center', width: 340, borderWidth: 1.5, borderColor: constants.glassBorder, zIndex: 2, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 24, shadowOffset: { width: 0, height: 12 }, elevation: 16 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16 }}>
+                <Feather name="edit-3" size={24} color={constants.accent} />
+                <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 20, color: constants.primaryText, marginLeft: 12 }}>Rename {(!renameItem?.url && !renameItem?.size && !renameItem?.type) ? 'Folder' : 'File'}</Text>
+                  </View>
+              <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 16, color: constants.secondaryText, marginBottom: 20, lineHeight: 22, textAlign: 'center' }}>
+                    Enter a new name for "{renameItem?.name}"
+                  </Text>
+                  <TextInput
+                style={{ borderWidth: 1, borderColor: constants.glassBorder, borderRadius: 12, padding: 16, fontSize: 16, color: constants.primaryText, backgroundColor: 'rgba(255,255,255,0.08)', marginBottom: 24, width: '100%', fontFamily: 'Inter_400Regular' }}
+                    value={newName}
+                    onChangeText={setNewName}
+                    placeholder="Enter new name"
+                placeholderTextColor={constants.secondaryText}
+                    autoFocus={true}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 12, width: '100%' }}>
+                    <TouchableOpacity
+                  style={{ flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.10)', borderColor: constants.glassBorder, borderWidth: 1 }}
+                      onPress={() => setShowRenameModal(false)}
+                    >
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: constants.primaryText, fontFamily: 'Inter_700Bold' }}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                  style={{ flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center', backgroundColor: constants.accent }}
+                      onPress={handleRename}
+                    >
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: constants.primaryText, fontFamily: 'Inter_700Bold' }}>Rename</Text>
+                    </TouchableOpacity>
+                  </View>
+            </BlurView>
+                </View>
+        </Modal>
+
+        {/* Create Folder Modal */}
+        <Modal
+          visible={showFolderModal}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setShowFolderModal(false)}
+        >
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <BlurView intensity={120} tint="dark" style={{ ...StyleSheet.absoluteFillObject, zIndex: 1 }}>
+              <View style={{ flex: 1, backgroundColor: 'rgba(10,10,20,0.55)' }} />
+            </BlurView>
+            <TouchableWithoutFeedback onPress={() => setShowFolderModal(false)}>
+              <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 2 }} />
+            </TouchableWithoutFeedback>
+            <BlurView intensity={90} tint="dark" style={{ backgroundColor: constants.glassBg, borderRadius: 28, padding: 32, alignItems: 'center', width: 340, borderWidth: 1.5, borderColor: constants.glassBorder, zIndex: 3, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 24, shadowOffset: { width: 0, height: 12 }, elevation: 16 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 16 }}>
+                <Feather name="folder-plus" size={24} color={constants.accent} />
+                <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 20, color: constants.primaryText, marginLeft: 12 }}>Create New Folder</Text>
+              </View>
+              <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 16, color: constants.secondaryText, marginBottom: 20, lineHeight: 22, textAlign: 'center' }}>
+                Enter a name for your new folder
+              </Text>
+              <TextInput
+                style={{ borderWidth: 1, borderColor: constants.glassBorder, borderRadius: 12, padding: 16, fontSize: 16, color: constants.primaryText, backgroundColor: 'rgba(255,255,255,0.08)', marginBottom: 24, width: '100%', fontFamily: 'Inter_400Regular' }}
+                value={newFolderName}
+                onChangeText={setNewFolderName}
+                placeholder="Folder name..."
+                placeholderTextColor={constants.secondaryText}
+                autoFocus={true}
+                autoCapitalize="none"
+                autoCorrect={false}
+                maxLength={50}
+              />
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 12, width: '100%' }}>
+                <TouchableOpacity
+                  style={{ flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.10)', borderColor: constants.glassBorder, borderWidth: 1 }}
+                  onPress={() => {
+                    setShowFolderModal(false);
+                    setNewFolderName('');
+                  }}
+                >
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: constants.primaryText, fontFamily: 'Inter_700Bold' }}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={{ flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center', backgroundColor: constants.accent }}
+                  onPress={handleAddFolder}
+                >
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: constants.primaryText, fontFamily: 'Inter_700Bold' }}>Create Folder</Text>
+                </TouchableOpacity>
+              </View>
+            </BlurView>
+          </View>
+        </Modal>
+
+        {/* Success Modal */}
+        <Modal
+          visible={showSuccessModal}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setShowSuccessModal(false)}
+        >
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <BlurView intensity={120} tint="dark" style={{ ...StyleSheet.absoluteFillObject, zIndex: 1 }}>
+              <View style={{ flex: 1, backgroundColor: 'rgba(10,10,20,0.55)' }} />
+            </BlurView>
+            <BlurView intensity={90} tint="dark" style={{ backgroundColor: constants.glassBg, borderRadius: 28, padding: 32, alignItems: 'center', width: 320, borderWidth: 1.5, borderColor: constants.glassBorder, zIndex: 2, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 24, shadowOffset: { width: 0, height: 12 }, elevation: 16 }}>
+              <View style={{ width: 80, height: 80, borderRadius: 40, alignItems: 'center', justifyContent: 'center', marginBottom: 20, backgroundColor: constants.accent }}>
+                    <Feather name="check-circle" size={48} color={constants.primaryText} />
+                  </View>
+              <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 24, color: constants.primaryText, marginBottom: 8, textAlign: 'center' }}>Success!</Text>
+              <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 16, color: constants.secondaryText, textAlign: 'center', marginBottom: 24, lineHeight: 22 }}>{successMessage}</Text>
+                  <TouchableOpacity
+                style={{ paddingVertical: 14, paddingHorizontal: 32, borderRadius: 12, minWidth: 100, alignItems: 'center', backgroundColor: constants.accent }}
+                    onPress={() => setShowSuccessModal(false)}
+                  >
+                <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 16, color: theme.textInverse }}>OK</Text>
+                  </TouchableOpacity>
+            </BlurView>
+                </View>
+        </Modal>
+
+        {/* Properties Modal */}
+        <Modal
+          visible={showPropertiesModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowPropertiesModal(false)}
+        >
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <BlurView intensity={120} tint="dark" style={{ ...StyleSheet.absoluteFillObject, zIndex: 1 }}>
+              <View style={{ flex: 1, backgroundColor: 'rgba(10,10,20,0.55)' }} />
+            </BlurView>
+            <BlurView intensity={90} tint="dark" style={{ backgroundColor: constants.glassBg, borderRadius: 28, padding: 32, alignItems: 'center', width: 340, borderWidth: 1.5, borderColor: constants.glassBorder, zIndex: 2, shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 24, shadowOffset: { width: 0, height: 12 }, elevation: 16 }}>
+              <Text style={{ color: constants.primaryText, fontWeight: 'bold', fontSize: 18, marginBottom: 12, textAlign: 'center', fontFamily: 'Inter_700Bold' }}>File Properties</Text>
+              {propertiesItem && (
+                <>
+                  <Text style={{ color: constants.secondaryText, marginBottom: 4, fontFamily: 'Inter_400Regular' }}><Text style={{ fontWeight: 'bold', color: constants.primaryText }}>Name:</Text> {propertiesItem.name}</Text>
+                  <Text style={{ color: constants.secondaryText, marginBottom: 4, fontFamily: 'Inter_400Regular' }}><Text style={{ fontWeight: 'bold', color: constants.primaryText }}>Size:</Text> {propertiesItem.size ? `${(propertiesItem.size/1024).toFixed(2)} KB` : 'Unknown'}</Text>
+                  <Text style={{ color: constants.secondaryText, marginBottom: 4, fontFamily: 'Inter_400Regular' }}><Text style={{ fontWeight: 'bold', color: constants.primaryText }}>Type:</Text> {propertiesItem.name.split('.').pop().toUpperCase()}</Text>
+                  <Text style={{ color: constants.secondaryText, marginBottom: 4, fontFamily: 'Inter_400Regular' }}><Text style={{ fontWeight: 'bold', color: constants.primaryText }}>Created:</Text> {propertiesItem.createdAt ? new Date(propertiesItem.createdAt).toLocaleString() : 'Unknown'}</Text>
+                  <Text style={{ color: constants.secondaryText, marginBottom: 4, fontFamily: 'Inter_400Regular' }}><Text style={{ fontWeight: 'bold', color: constants.primaryText }}>Updated:</Text> {propertiesItem.updatedAt ? new Date(propertiesItem.updatedAt).toLocaleString() : 'Unknown'}</Text>
+                  {propertiesItem.url && <Text style={{ color: constants.secondaryText, marginBottom: 4, fontFamily: 'Inter_400Regular' }} numberOfLines={1}><Text style={{ fontWeight: 'bold', color: constants.primaryText }}>URL:</Text> {propertiesItem.url}</Text>}
+                </>
+              )}
+              <TouchableOpacity style={{ marginTop: 18, alignSelf: 'center', backgroundColor: constants.accent, borderRadius: 16, paddingVertical: 14, paddingHorizontal: 32 }} onPress={() => setShowPropertiesModal(false)}>
+                <Text style={{ color: constants.primaryText, fontWeight: 'bold', fontSize: 16, fontFamily: 'Inter_700Bold' }}>Close</Text>
+              </TouchableOpacity>
+            </BlurView>
+            </View>
+        </Modal>
+        </View>
+      </View>
+    </SafeAreaView>
   );
 }
 
@@ -579,17 +1830,15 @@ const styles = StyleSheet.create({
   searchBarWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f6f6f6',
-    borderRadius: 18,
+    borderRadius: 20,
     marginHorizontal: 18,
-    marginBottom: 18,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    shadowColor: '#000',
-    shadowOpacity: 0.04,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 1,
+    marginBottom: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    shadowOpacity: 0.1,
+    shadowRadius: 15,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   searchIcon: {
     marginRight: 8,
@@ -598,10 +1847,9 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'transparent',
     borderRadius: 16,
-    paddingHorizontal: 8,
-    paddingVertical: 8,
-    fontSize: 17,
-    color: '#222',
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    fontSize: 16,
     fontWeight: '500',
     fontFamily: 'System',
   },
@@ -631,16 +1879,14 @@ const styles = StyleSheet.create({
   fileCardRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#faf9f7',
-    borderRadius: 16,
+    borderRadius: 18,
     marginHorizontal: 18,
-    marginBottom: 14,
-    padding: 16,
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
+    marginBottom: 16,
+    padding: 18,
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
     shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
+    elevation: 4,
   },
   fileThumbWrap: {
     width: 48,
@@ -695,15 +1941,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   createFolderModal: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 28,
-    minWidth: 260,
-    shadowColor: '#000',
-    shadowOpacity: 0.12,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 8,
+    borderRadius: 24,
+    padding: 32,
+    minWidth: 280,
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
     alignItems: 'stretch',
   },
   createFolderTitle: {
@@ -730,17 +1974,15 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   categoryButton: {
-    paddingVertical: 10,
-    paddingHorizontal: 22,
-    borderRadius: 22,
-    marginRight: 12,
-    backgroundColor: '#fff',
-    shadowColor: '#0061FF',
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 24,
+    marginRight: 14,
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
     elevation: 2,
-    minWidth: 64,
+    minWidth: 70,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -822,17 +2064,14 @@ const styles = StyleSheet.create({
   },
   sortModalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.18)',
     justifyContent: 'center',
     alignItems: 'center',
   },
   sortModalCard: {
-    backgroundColor: '#fff',
     borderRadius: 28,
     paddingVertical: 36,
     paddingHorizontal: 32,
     minWidth: 240,
-    shadowColor: '#003366',
     shadowOpacity: 0.22,
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 12 },
@@ -843,14 +2082,12 @@ const styles = StyleSheet.create({
   sortModalTitle: {
     fontSize: 20,
     fontWeight: 'bold',
-    color: '#2563eb',
     marginBottom: 10,
     textAlign: 'center',
   },
   sortModalDivider: {
     width: '100%',
     height: 1.5,
-    backgroundColor: '#e0e7ef',
     marginBottom: 18,
     borderRadius: 1,
   },
@@ -861,11 +2098,9 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     width: 160,
     alignItems: 'center',
-    backgroundColor: '#f7fafd',
     borderWidth: 0,
   },
   sortOptionBtnSelected: {
-    backgroundColor: '#e6f0fa',
     borderColor: '#2563eb',
     borderWidth: 2,
     shadowColor: '#2563eb',
@@ -876,7 +2111,6 @@ const styles = StyleSheet.create({
   },
   sortOptionText: {
     fontSize: 16,
-    color: '#222',
     fontWeight: 'bold',
   },
   sortOptionTextSelected: {
@@ -887,16 +2121,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   sortModalCloseText: {
-    color: '#2563eb',
     fontWeight: 'bold',
     fontSize: 17,
     letterSpacing: 0.2,
   },
   plusButton: {
     position: 'absolute',
-    bottom: 32,
+    bottom: 120,
     right: 24,
-    backgroundColor: '#0061FF',
+    backgroundColor: '#1d9bf0', // Will be overridden by inline style
     borderRadius: 30,
     width: 60,
     height: 60,
@@ -906,14 +2139,12 @@ const styles = StyleSheet.create({
   },
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.2)',
     justifyContent: 'flex-end',
   },
   wheel: {
     width: 260,
     height: 260,
     borderRadius: 130,
-    backgroundColor: '#e5e7eb',
     position: 'absolute',
     top: '50%',
     left: '50%',
@@ -928,10 +2159,8 @@ const styles = StyleSheet.create({
     width: 64,
     height: 64,
     borderRadius: 32,
-    backgroundColor: '#e5e7eb',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#2563eb',
     shadowOpacity: 0.08,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 2 },
@@ -986,5 +2215,721 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     marginTop: 10,
+  },
+  breadcrumbWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 18,
+    paddingTop: 6,
+    paddingBottom: 8,
+  },
+  breadcrumbItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  breadcrumbText: {
+    color: '#888',
+    fontSize: 15,
+    fontWeight: '500',
+    marginRight: 2,
+  },
+  breadcrumbTextActive: {
+    color: '#2563eb',
+    fontWeight: 'bold',
+  },
+  breadcrumbSeparator: {
+    color: '#bbb',
+    marginHorizontal: 2,
+    fontSize: 15,
+  },
+  skeletonFile: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 12,
+    marginHorizontal: 12,
+    marginVertical: 4,
+    padding: 12,
+  },
+  skeletonFolder: {
+    alignItems: 'center',
+    borderRadius: 12,
+    margin: 8,
+    padding: 12,
+    width: 110,
+  },
+  skeletonIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 8,
+    marginRight: 12,
+  },
+  skeletonTextBlock: {
+    height: 14,
+    borderRadius: 6,
+    flex: 1,
+    marginBottom: 6,
+  },
+  skeletonTextBlockSmall: {
+    height: 10,
+    width: 60,
+    borderRadius: 5,
+    marginTop: 2,
+  },
+  uploadProgressWrap: {
+    width: 220,
+    height: 18,
+    backgroundColor: '#e0e7ef',
+    borderRadius: 9,
+    marginTop: 18,
+    overflow: 'hidden',
+    justifyContent: 'center',
+  },
+  uploadProgressBar: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: '#2563eb',
+    borderRadius: 9,
+    height: 18,
+    zIndex: 1,
+  },
+  uploadProgressText: {
+    color: '#2563eb',
+    fontWeight: 'bold',
+    fontSize: 13,
+    textAlign: 'center',
+    zIndex: 2,
+  },
+  centeredMenuCard: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 20,
+    width: '80%',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
+  },
+  centeredMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 15,
+    paddingHorizontal: 20,
+    width: '100%',
+    justifyContent: 'center',
+  },
+  centeredMenuText: {
+    fontSize: 16,
+    color: '#222',
+    fontWeight: '600',
+    marginLeft: 12,
+  },
+  // Modal Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 24,
+    width: '85%',
+    maxWidth: 320,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 10,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#222',
+    marginLeft: 12,
+  },
+  modalSubtitle: {
+    fontSize: 16,
+    color: '#666',
+    marginBottom: 20,
+    lineHeight: 22,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: '#e0e7ef',
+    borderRadius: 12,
+    padding: 16,
+    fontSize: 16,
+    color: '#222',
+    backgroundColor: '#f8fafc',
+    marginBottom: 24,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  modalButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalButtonCancel: {
+    backgroundColor: '#f1f5f9',
+  },
+  modalButtonConfirm: {
+    backgroundColor: '#2563eb',
+  },
+  modalButtonCancelText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  modalButtonConfirmText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  // Success Modal Styles
+  successModalContent: {
+    borderRadius: 24,
+    padding: 32,
+    width: '85%',
+    maxWidth: 300,
+    alignItems: 'center',
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 10,
+  },
+  successIconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  successTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    marginBottom: 8,
+  },
+  successMessage: {
+    fontSize: 16,
+    textAlign: 'center',
+    marginBottom: 24,
+    lineHeight: 22,
+  },
+  successButton: {
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+    borderRadius: 12,
+    minWidth: 100,
+    alignItems: 'center',
+  },
+  successButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  // Current Folder Indicator Styles
+  currentFolderIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f0f9ff',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    marginHorizontal: 16,
+    marginBottom: 8,
+    borderRadius: 8,
+    borderLeftWidth: 4,
+    borderLeftColor: '#0061FF',
+  },
+  currentFolderText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#0061FF',
+    marginLeft: 8,
+  },
+  // Upload Success Animation Styles
+  uploadSuccessOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 1000,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+  },
+  uploadSuccessCard: {
+    backgroundColor: 'rgba(0, 0, 0, 0.9)', // Dark background for consistency
+    borderRadius: 16,
+    padding: 24,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  uploadSuccessIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(29, 155, 240, 0.2)', // Twitter blue with transparency
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  uploadSuccessText: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#1d9bf0', // Twitter blue
+    textAlign: 'center',
+  },
+  // Enhanced Empty State Styles
+  emptyStateContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 80,
+    paddingHorizontal: 20,
+  },
+  emptyStateIconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  emptyStateTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  emptyStateSubtitle: {
+    fontSize: 16,
+    textAlign: 'center',
+    marginBottom: 24,
+    lineHeight: 22,
+    paddingHorizontal: 20,
+  },
+  emptyStateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  emptyStateButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  // Empty State Styles (Legacy - keeping for compatibility)
+  emptyFolderState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 60,
+    paddingHorizontal: 20,
+  },
+  emptyFileState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 60,
+    paddingHorizontal: 20,
+  },
+  glassSearchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 22,
+    marginHorizontal: 18,
+    marginBottom: 16,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    backgroundColor: 'transparent', // fully transparent
+    borderWidth: 0, // remove border
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
+  },
+  glassSearchInput: {
+    flex: 1,
+    backgroundColor: 'transparent', // fully transparent
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: 17,
+    fontWeight: '500',
+    color: '#fff',
+    fontFamily: 'Inter',
+    borderWidth: 0, // remove border
+    shadowOpacity: 0, // remove shadow
+  },
+  searchIcon: {
+    marginRight: 10,
+  },
+  searchRefreshBtn: {
+    padding: 8,
+    marginLeft: 4,
+    borderRadius: 16,
+    backgroundColor: 'rgba(41,121,255,0.08)',
+  },
+  categoryBar: {
+    marginBottom: 18,
+    marginLeft: 16,
+    flexDirection: 'row',
+    paddingVertical: 8,
+  },
+  categoryButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 24,
+    marginRight: 14,
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
+    minWidth: 70,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  categoryButtonSelected: {
+    backgroundColor: '#0061FF',
+    shadowColor: '#0061FF',
+    shadowOpacity: 0.16,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 5,
+  },
+  categoryButtonText: {
+    color: '#222',
+    fontWeight: 'bold',
+    fontSize: 16,
+    fontFamily: 'System',
+    letterSpacing: 0.2,
+  },
+  categoryButtonTextSelected: {
+    color: '#fff',
+  },
+  segmentBarModern: {
+    flexDirection: 'row',
+    paddingVertical: 0,
+    marginHorizontal: 0,
+    marginBottom: 18,
+    backgroundColor: 'transparent',
+  },
+  segmentModernButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 22,
+    borderRadius: 18,
+    marginRight: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 60,
+    borderWidth: 0,
+  },
+  segmentModernButtonSelected: {
+    backgroundColor: '#fff',
+  },
+  segmentModernButtonUnselected: {
+    backgroundColor: 'rgba(255,255,255,0.10)',
+  },
+  segmentModernText: {
+    fontSize: 16,
+    fontFamily: 'Inter',
+    fontWeight: '600',
+    letterSpacing: 0.1,
+  },
+  segmentModernTextSelected: {
+    color: '#1a2340',
+    fontWeight: '700',
+    fontFamily: 'Inter',
+  },
+  segmentModernTextUnselected: {
+    color: '#e0e6f3',
+    fontWeight: '600',
+    fontFamily: 'Inter',
+  },
+  emptyGlassCard: {
+    alignItems: 'center',
+    borderRadius: 28,
+    padding: 32,
+    marginHorizontal: 24,
+    marginVertical: 32,
+    backgroundColor: 'rgba(20,40,80,0.32)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.10)',
+    shadowOpacity: 0.10,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
+  },
+  emptyGlassIconWrap: {
+    marginBottom: 16,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderRadius: 18,
+    padding: 18,
+  },
+  emptyGlassTitle: {
+    fontFamily: 'Inter',
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#fff',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  emptyGlassSubtitle: {
+    fontFamily: 'Inter',
+    fontSize: 15,
+    color: '#e0e6f3',
+    marginBottom: 18,
+    textAlign: 'center',
+  },
+  emptyGlassButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    paddingVertical: 10,
+    paddingHorizontal: 22,
+    marginTop: 8,
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  emptyGlassButtonText: {
+    fontFamily: 'Inter',
+    fontWeight: '700',
+    color: '#2979FF',
+    fontSize: 16,
+  },
+  glassModalOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(10,16,32,0.32)',
+  },
+  glassModalCard: {
+    borderRadius: 28,
+    paddingVertical: 36,
+    paddingHorizontal: 32,
+    minWidth: 260,
+    backgroundColor: 'rgba(20,40,80,0.32)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.10)',
+    alignItems: 'center',
+    shadowOpacity: 0.10,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 12,
+  },
+  glassModalTitle: {
+    fontFamily: 'Inter',
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#fff',
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  glassModalDivider: {
+    width: '100%',
+    height: 1.5,
+    marginBottom: 18,
+    borderRadius: 1,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+  },
+  glassModalOptionBtn: {
+    paddingVertical: 14,
+    paddingHorizontal: 22,
+    borderRadius: 16,
+    marginBottom: 10,
+    width: 160,
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  glassModalOptionBtnSelected: {
+    backgroundColor: '#2979FF',
+  },
+  glassModalOptionText: {
+    fontFamily: 'Inter',
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#e0e6f3',
+  },
+  glassModalOptionTextSelected: {
+    color: '#fff',
+    fontWeight: '700',
+  },
+  glassModalCloseBtn: {
+    marginTop: 16,
+    alignItems: 'center',
+  },
+  glassModalCloseText: {
+    fontFamily: 'Inter',
+    fontWeight: '700',
+    fontSize: 17,
+    color: '#2979FF',
+    letterSpacing: 0.2,
+  },
+  glassMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderRadius: 16,
+    marginBottom: 2,
+    width: 180,
+    justifyContent: 'flex-start',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+  },
+  glassMenuText: {
+    fontFamily: 'Inter',
+    fontSize: 16,
+    color: '#fff',
+    fontWeight: '600',
+    marginLeft: 14,
+  },
+  fullModalOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 1000,
+  },
+  fullModalBlur: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1,
+  },
+  fullModalDarkOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(10,10,20,0.55)',
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 2,
+  },
+  solidModalCard: {
+    borderRadius: 28,
+    paddingVertical: 36,
+    paddingHorizontal: 32,
+    minWidth: 260,
+    backgroundColor: 'rgba(20,40,80,0.32)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.10)',
+    alignItems: 'center',
+    elevation: 12,
+  },
+  glassMenuCard: {
+    borderRadius: 24,
+    paddingVertical: 18,
+    paddingHorizontal: 0,
+    minWidth: 220,
+    backgroundColor: 'rgba(20,40,80,0.32)',
+    borderWidth: 1.2,
+    borderColor: 'rgba(255,255,255,0.10)',
+    alignItems: 'center',
+    elevation: 8,
+  },
+  glassMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: 18,
+    marginBottom: 2,
+    width: 220,
+    justifyContent: 'flex-start',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+  },
+  glassMenuText: {
+    fontFamily: 'Inter',
+    fontSize: 16,
+    color: '#fff',
+    fontWeight: '600',
+    marginLeft: 14,
+  },
+  settingsMenuCard: {
+    borderRadius: 28,
+    paddingVertical: 24,
+    paddingHorizontal: 0,
+    minWidth: 260,
+    backgroundColor: 'rgba(20,40,80,0.32)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.10)',
+    alignItems: 'center',
+    elevation: 12,
+  },
+  settingsMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    borderRadius: 18,
+    marginBottom: 2,
+    width: 240,
+    justifyContent: 'flex-start',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+  },
+  settingsMenuText: {
+    fontFamily: 'Inter',
+    fontSize: 17,
+    color: '#fff',
+    fontWeight: '700',
+    marginLeft: 18,
+  },
+  segmentTab: {
+    paddingVertical: 8,
+    paddingHorizontal: 22,
+    borderRadius: 18,
+    marginRight: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 60,
+    borderWidth: 0,
+  },
+  segmentTabSelected: {
+    borderBottomWidth: 2,
+  },
+  glassySearchBarWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 20, // reduced from 32
+    marginHorizontal: 0,
+    marginBottom: 16,
+    paddingHorizontal: 14, // slightly reduced
+    paddingVertical: 8, // reduced from 14
+    shadowOpacity: 0.12,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
+    backgroundColor: 'rgba(20,40,80,0.32)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.10)',
+    width: '95%',
+    alignSelf: 'center',
   },
 }); 

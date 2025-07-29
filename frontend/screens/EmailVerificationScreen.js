@@ -1,10 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, SafeAreaView, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, SafeAreaView, Alert, ActivityIndicator, Animated } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL, verifyEmail } from './api';
-import CustomPrompt from './CustomPromptScreen';
+import CustomPrompt from './CustomPrompt';
+import { useTheme } from '../theme/ThemeContext';
+import { LinearGradient } from 'expo-linear-gradient';
+import { BlurView } from 'expo-blur';
+import { useFonts, Inter_400Regular, Inter_700Bold } from '@expo-google-fonts/inter';
 
 export default function EmailVerificationScreen({ navigation, route }) {
+  const { theme, constants } = useTheme();
   const [code, setCode] = useState(['', '', '', '', '', '']);
   const [email, setEmail] = useState(route?.params?.email || '');
   const inputs = [useRef(), useRef(), useRef(), useRef(), useRef(), useRef()];
@@ -12,6 +17,8 @@ export default function EmailVerificationScreen({ navigation, route }) {
   const [promptVisible, setPromptVisible] = useState(false);
   const [promptMessage, setPromptMessage] = useState('');
   const [promptSuccess, setPromptSuccess] = useState(true);
+  const cardAnim = useRef(new Animated.Value(0)).current;
+  const [focusedInput, setFocusedInput] = useState(-1);
 
   // If email is not passed, try to get it from AsyncStorage
   useEffect(() => {
@@ -20,6 +27,10 @@ export default function EmailVerificationScreen({ navigation, route }) {
         if (storedEmail) setEmail(storedEmail);
       });
     }
+  }, []);
+
+  useEffect(() => {
+    Animated.timing(cardAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
   }, []);
 
   const handleChange = (text, idx) => {
@@ -38,7 +49,7 @@ export default function EmailVerificationScreen({ navigation, route }) {
 
   const handleVerify = async () => {
     setLoading(true);
-    const codeStr = code.join('');
+      const codeStr = code.join('');
     if (codeStr.length !== 6) {
       setPromptMessage('Please enter the 6-digit code.');
       setPromptSuccess(false);
@@ -84,154 +95,150 @@ export default function EmailVerificationScreen({ navigation, route }) {
     }
   };
 
+  let [fontsLoaded] = useFonts({ Inter_400Regular, Inter_700Bold });
+  if (!fontsLoaded) return null;
+
   return (
-    <SafeAreaView style={styles.container}>
-      <Text style={styles.simpleTitle}>Verify Email</Text>
-      <View style={styles.card}>
-        <Text style={styles.header}>Verify your CloudStore email</Text>
-        <Text style={styles.message}>Enter the 6-digit verification code sent to your email address.</Text>
-        <View style={styles.codeInputRow}>
-          {code.map((digit, idx) => (
-            <TextInput
-              key={idx}
-              ref={inputs[idx]}
-              style={styles.input}
-              value={digit}
-              onChangeText={text => handleChange(text, idx)}
-              keyboardType="number-pad"
-              maxLength={1}
-              placeholder="-"
-              placeholderTextColor="#888"
-              returnKeyType="next"
-              autoFocus={idx === 0}
-            />
-          ))}
-        </View>
-        <TouchableOpacity style={styles.button} activeOpacity={0.85} onPress={handleVerify} disabled={loading}>
-          {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Verify Email</Text>}
-        </TouchableOpacity>
-      </View>
-      {loading && (
-        <View style={styles.loadingOverlay}>
-          <ActivityIndicator size="large" color="#0061FF" />
-        </View>
-      )}
-      <CustomPrompt
-        visible={promptVisible}
-        message={promptMessage}
-        onClose={handlePromptClose}
-        success={promptSuccess}
-      />
-    </SafeAreaView>
+    <LinearGradient colors={constants.gradient} style={{ flex: 1 }}>
+      <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 12 }}>
+        <BlurView intensity={90} tint="dark" style={{ backgroundColor: constants.glassBg, borderRadius: 28, borderWidth: 1.5, borderColor: constants.glassBorder, padding: 32, alignItems: 'center', width: '100%', maxWidth: 380, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 24, shadowOffset: { width: 0, height: 12 }, elevation: 12 }}>
+          <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 24, color: constants.primaryText, marginBottom: 10, textAlign: 'center', letterSpacing: 0.1 }}>Verify your CloudStore email</Text>
+          <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 16, color: constants.secondaryText, marginBottom: 18, textAlign: 'center', letterSpacing: 0.1 }}>Enter the 6-digit verification code sent to your email address.</Text>
+          <View style={{ width: '100%', alignItems: 'center', justifyContent: 'center' }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginBottom: 32, marginTop: 16, alignSelf: 'center' }}>
+              {code.map((digit, idx) => (
+                <TextInput
+                  key={idx}
+                  ref={inputs[idx]}
+                  style={[
+                    { borderRadius: 12, paddingHorizontal: 0, paddingVertical: 12, fontSize: 24, borderWidth: 1.5, textAlign: 'center', width: 48, height: 64, fontWeight: 'bold', letterSpacing: 1, includeFontPadding: false, textAlignVertical: 'center', marginHorizontal: 2, backgroundColor: 'rgba(255,255,255,0.08)', fontFamily: 'Inter_700Bold', color: constants.primaryText },
+                    { borderColor: constants.glassBorder },
+                    digit && { borderColor: constants.accent, backgroundColor: constants.accent + '20' },
+                    focusedInput === idx && { borderColor: constants.accent }
+                  ]}
+                  value={digit}
+                  onChangeText={text => handleChange(text, idx)}
+                  keyboardType="number-pad"
+                  maxLength={1}
+                  placeholder=""
+                  placeholderTextColor="transparent"
+                  returnKeyType="next"
+                  autoFocus={idx === 0}
+                  onFocus={() => setFocusedInput(idx)}
+                  onBlur={() => setFocusedInput(-1)}
+                />
+              ))}
+            </View>
+          </View>
+          <TouchableOpacity style={{ borderRadius: 18, paddingVertical: 16, paddingHorizontal: 32, width: '100%', alignItems: 'center', backgroundColor: constants.accent, shadowOpacity: 0.10, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 2, marginTop: 8 }} activeOpacity={0.85} onPress={handleVerify} disabled={loading}>
+            {loading ? <ActivityIndicator color={constants.primaryText} /> : <Text style={{ color: constants.primaryText, fontFamily: 'Inter_700Bold', fontSize: 17, textAlign: 'center' }}>Verify Email</Text>}
+          </TouchableOpacity>
+        </BlurView>
+        {loading && (
+          <View style={{ ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', zIndex: 10 }}>
+            <ActivityIndicator size="large" color={constants.accent} />
+          </View>
+        )}
+        <CustomPrompt
+          visible={promptVisible}
+          message={promptMessage}
+          onClose={handlePromptClose}
+          success={promptSuccess}
+        />
+      </SafeAreaView>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f6f8fc',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 12,
   },
   card: {
-    backgroundColor: '#fff',
     borderRadius: 24,
-    padding: 16,
+    padding: 24,
     width: '100%',
     maxWidth: 350,
-    shadowColor: '#0061FF',
     shadowOpacity: 0.08,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 4 },
     elevation: 3,
     alignItems: 'center',
+    marginBottom: 18,
   },
   header: {
-    fontSize: 32,
+    fontSize: 24,
     fontWeight: 'bold',
-    color: '#0061FF',
-    marginBottom: 18,
-    fontFamily: 'System',
+    marginBottom: 10,
     textAlign: 'center',
+    letterSpacing: 0.1,
   },
   message: {
     fontSize: 16,
-    color: '#888',
     fontWeight: '400',
-    fontFamily: 'System',
     marginBottom: 18,
     textAlign: 'center',
+    letterSpacing: 0.1,
   },
   codeInputRow: {
     flexDirection: 'row',
     justifyContent: 'center',
-    marginBottom: 24,
-    marginTop: 8,
+    alignItems: 'center',
+    marginBottom: 32,
+    marginTop: 16,
+    gap: 4, // reduced from 12
+    alignSelf: 'center',
   },
   input: {
-    backgroundColor: '#faf9f7',
-    borderRadius: 14,
-    padding: 10,
-    fontSize: 16,
-    color: '#222',
-    fontFamily: 'System',
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: '#eee',
+    borderRadius: 12,
+    paddingHorizontal: 0,
+    paddingVertical: 12,
+    fontSize: 24,
+    borderWidth: 1.5,
+    textAlign: 'center',
+    width: 40, // reduced from 44
+    height: 64, // increased from 50
+    fontWeight: 'bold',
+    letterSpacing: 1,
+    includeFontPadding: false,
+    textAlignVertical: 'center',
+    marginHorizontal: 2, // reduced from 4
+    backgroundColor: 'transparent',
+  },
+  inputFilled: {
+    // Colors applied dynamically
+  },
+  inputFocused: {
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   button: {
-    backgroundColor: '#0061FF',
-    borderRadius: 18,
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    marginBottom: 16,
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 32,
     width: '100%',
     alignItems: 'center',
-    shadowColor: '#0061FF',
-    shadowOpacity: 0.12,
+    marginTop: 10,
+    shadowOpacity: 0.06,
     shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
+    shadowOffset: { width: 0, height: 2 },
     elevation: 2,
   },
   buttonText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 18,
-    fontFamily: 'System',
-  },
-  link: {
-    color: '#0061FF',
     fontWeight: 'bold',
     fontSize: 16,
-    fontFamily: 'System',
     textAlign: 'center',
-    marginTop: 8,
-  },
-  error: {
-    color: 'crimson',
-    fontSize: 15,
-    fontWeight: 'bold',
-    marginBottom: 10,
-    textAlign: 'center',
-  },
-  simpleTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#222',
-    marginTop: 24,
-    marginBottom: 16,
-    textAlign: 'center',
+    letterSpacing: 0.1,
   },
   loadingOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(255,255,255,0.6)',
-    justifyContent: 'center',
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
-    zIndex: 1000,
+    justifyContent: 'center',
+    zIndex: 10,
   },
 }); 

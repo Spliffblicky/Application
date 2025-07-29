@@ -1,5 +1,6 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Modal } from 'react-native';
+import { useTheme } from '..//theme/ThemeContext';
 // If using expo-blur, uncomment the next line:
 // import { BlurView } from 'expo-blur';
 

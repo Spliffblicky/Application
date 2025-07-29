@@ -1,51 +1,155 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, SectionList, Alert, SafeAreaView, ScrollView, Image } from 'react-native';
-import { searchFiles } from './api';
+import React, { useState, useRef, useEffect } from 'react';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, Alert, ScrollView, Image, Animated, FlatList, RefreshControl, Dimensions, Modal, TouchableWithoutFeedback } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { searchFiles, listFiles } from './api';
+import Feather from 'react-native-vector-icons/Feather';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useNavigation } from '@react-navigation/native';
+import { useTheme } from '../theme/ThemeContext';
+import { useNotification } from './AuthContext';
+import { BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
+import FileItem from './FileItem';
 
-const user = { name: 'Lazarus' }; // Replace with actual user context if available
+
+const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
+
+const user = { name: 'Lazarus', avatar: 'https://img.icons8.com/color/96/user-male-circle--v2.png' };
+
+// DEEP_BLUE_GRADIENT moved to theme constants
 
 export default function HomeScreen() {
+  const { theme, constants } = useTheme();
   const [folders, setFolders] = useState([]);
+  const [allFiles, setAllFiles] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const featureImages = [
-    { uri: 'https://img.icons8.com/color/96/upload-to-cloud.png', label: 'Upload files', tagline: 'Add files to your cloud in seconds.' },
-    { uri: 'https://img.icons8.com/color/96/share.png', label: 'Share with friends', tagline: 'Send files securely to anyone.' },
-    { uri: 'https://img.icons8.com/color/96/cloud.png', label: 'Access anywhere', tagline: 'Your files, always with you.' },
-    { uri: 'https://img.icons8.com/color/96/star.png', label: 'Favorite files', tagline: 'Keep important files at your fingertips.' },
-  ];
-  const recentFiles = [
-    { id: '1', name: 'Document.pdf', modified: '1 week ago', thumb: 'https://img.icons8.com/color/96/pdf.png' },
-    { id: '2', name: 'Document.docx', modified: '1 week ago', thumb: 'https://img.icons8.com/color/96/ms-word.png' },
-  ];
-  const recentActivity = [
-    { icon: 'edit-3', text: 'You edited Document.docx' },
-    { icon: 'user-plus', text: 'You shared a folder with Jane' },
-  ];
+  const [showPreviewModal, setShowPreviewModal] = useState(false);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const heroAnim = useRef(new Animated.Value(0)).current;
+  const recentAnim = useRef(new Animated.Value(0)).current;
+  const navigation = useNavigation();
+  const { hasUnread, unreadCount, markAllRead } = useNotification();
 
-  const sections = [
-    {
-      title: 'Suggested for you',
-      data: [],
-      key: 'suggested',
-    },
-    {
-      title: 'Folders',
-      data: folders.length ? folders : [{}],
-      key: 'folders',
-    },
-    {
-      title: 'Recent Files',
-      data: recentFiles.length ? recentFiles : [{}],
-      key: 'files',
-    },
-    {
-      title: 'Recent activity',
-      data: recentActivity.length ? recentActivity : [{}],
-      key: 'activity',
-    },
-  ];
+  useEffect(() => {
+    Animated.stagger(120, [
+      Animated.timing(heroAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+      Animated.timing(recentAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+    ]).start();
+    
+    fetchFiles();
+
+  }, []);
+
+  const fetchFiles = async () => {
+    try {
+      const token = await AsyncStorage.getItem('jwt');
+      if (!token) return;
+
+      const res = await listFiles(token);
+      if (res.success) {
+        setAllFiles(res.data);
+      }
+    } catch (err) {
+      console.error('Error fetching files:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const refreshFiles = async () => {
+    setRefreshing(true);
+    await fetchFiles();
+    setRefreshing(false);
+  };
+
+
+
+  const formatDate = (dateString) => {
+    if (!dateString) return 'Unknown';
+    
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffTime = Math.abs(now - date);
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    
+    if (diffDays === 1) return 'Today';
+    if (diffDays === 2) return 'Yesterday';
+    if (diffDays <= 7) return `${diffDays - 1} days ago`;
+    if (diffDays <= 30) return `${Math.floor(diffDays / 7)} weeks ago`;
+    if (diffDays <= 365) return `${Math.floor(diffDays / 30)} months ago`;
+    return `${Math.floor(diffDays / 365)} years ago`;
+  };
+
+  const getFileIcon = (fileName) => {
+    if (!fileName) return 'https://img.icons8.com/color/96/file.png';
+    
+    const extension = fileName.split('.').pop()?.toLowerCase();
+    
+    switch (extension) {
+      case 'pdf':
+        return 'https://img.icons8.com/color/96/pdf.png';
+      case 'doc':
+      case 'docx':
+        return 'https://img.icons8.com/color/96/ms-word.png';
+      case 'xls':
+      case 'xlsx':
+        return 'https://img.icons8.com/color/96/ms-excel.png';
+      case 'ppt':
+      case 'pptx':
+        return 'https://img.icons8.com/color/96/ms-powerpoint.png';
+      case 'jpg':
+      case 'jpeg':
+      case 'png':
+      case 'gif':
+      case 'bmp':
+        return 'https://img.icons8.com/color/96/image.png';
+      case 'mp4':
+      case 'avi':
+      case 'mov':
+      case 'wmv':
+        return 'https://img.icons8.com/color/96/video.png';
+      case 'mp3':
+      case 'wav':
+      case 'flac':
+        return 'https://img.icons8.com/color/96/music.png';
+      case 'zip':
+      case 'rar':
+      case '7z':
+        return 'https://img.icons8.com/color/96/zip.png';
+      case 'txt':
+        return 'https://img.icons8.com/color/96/text.png';
+      default:
+        return 'https://img.icons8.com/color/96/file.png';
+    }
+  };
+
+  // Get recent files (last 5 files, excluding compressed ones)
+  const recentFiles = allFiles
+    .filter(file => !file.name?.includes('_compressed'))
+    .slice(0, 5)
+    .map(file => ({
+      id: file.id,
+      name: file.name,
+      modified: formatDate(file.modifiedAt || file.createdAt),
+      thumb: getFileIcon(file.name),
+      file: file
+    }));
+
+  // Get starred files
+  const starredFiles = allFiles
+    .filter(file => (file.favourite || file.favorites) && !file.name?.includes('_compressed'))
+    .slice(0, 5)
+    .map(file => ({
+      id: file.id,
+      name: file.name,
+      modified: formatDate(file.modifiedAt || file.createdAt),
+      thumb: getFileIcon(file.name),
+      file: file
+    }));
 
   const handleSearch = async (query) => {
     setSearchQuery(query);
@@ -53,478 +157,1110 @@ export default function HomeScreen() {
       setSearchResults(null);
       return;
     }
-    const res = await searchFiles(token, query);
-    if (res.success) {
-      setSearchResults(res.data);
-    } else {
+    
+    try {
+      const token = await AsyncStorage.getItem('jwt');
+      if (!token) return;
+      
+      const res = await searchFiles(token, query);
+      if (res.success) {
+        setSearchResults(res.data);
+      } else {
+        setSearchResults([]);
+      }
+    } catch (err) {
+      console.error('Search error:', err);
       setSearchResults([]);
     }
   };
 
+  const getFilePreview = (file) => {
+    if (!file || !file.name) return null;
+    
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    
+    // For images, show the actual image
+    if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(extension)) {
+      return { type: 'image', source: file.url };
+    }
+    
+    // For videos, show a video thumbnail with play icon
+    if (['mp4', 'avi', 'mov', 'wmv', 'flv', 'webm', 'mkv'].includes(extension)) {
+      return { type: 'video', source: file.url };
+    }
+    
+    // For audio, show audio waveform or music icon
+    if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a'].includes(extension)) {
+      return { type: 'audio', source: file.url };
+    }
+    
+    // For PDFs, show PDF icon with preview
+    if (extension === 'pdf') {
+      return { type: 'pdf', source: file.url };
+    }
+    
+    // For text files, show text preview
+    if (['txt', 'md', 'json', 'xml', 'html', 'css', 'js', 'py', 'java', 'cpp', 'c', 'php'].includes(extension)) {
+      return { type: 'text', source: file.url };
+    }
+    
+    // For other files, show file icon
+    return { type: 'file', source: null };
+  };
+
+  const handleFilePress = (file) => {
+    // Find the index of the tapped file in recentFiles
+    const index = recentFiles.findIndex(f => f.file.id === file.id);
+    // Pass the full recentFiles list and initial index to FileViewer
+    navigation.navigate('FileViewer', { files: recentFiles.map(f => f.file), initialIndex: index });
+  };
+
   return (
-    <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* Hero Section with Welcome Message and Search Bar Overlay */}
-        <View style={styles.heroSection}>
-          <Image source={{ uri: 'https://static.storyset.com/illustration/welcome/rafiki/welcome-rafiki.png' }} style={styles.heroImage} resizeMode="contain" />
-          <View style={styles.heroOverlay} />
-          <View style={styles.heroContent}>
-            <Text style={styles.welcomeText}>Welcome back, {user.name}!</Text>
-            <View style={styles.heroSearchBarWrap}>
-              <Image source={{ uri: 'https://img.icons8.com/ios-filled/50/888888/search--v1.png' }} style={styles.searchIconImg} />
-              <TextInput
-                style={styles.searchInput}
-                placeholder="Search CloudStore"
-                placeholderTextColor="#bbb"
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-              />
-            </View>
-          </View>
-        </View>
-        {/* Show folders in grid */}
-        {folders.length > 0 && (
-          <View style={styles.foldersGrid}>
-            {folders.map(folder => (
-              <TouchableOpacity key={folder.id} style={styles.folderCardGrid} onPress={() => Alert.alert('Open Folder', `Open folder: ${folder.name}`)}>
-                <Image source={{ uri: 'https://img.icons8.com/color/96/folder-invoices--v2.png' }} style={styles.folderIconImgGrid} />
-                <Text style={styles.folderNameGrid}>{folder.name}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
-        <View style={styles.sectionCard}>
-          <View style={styles.sectionHeaderRow}>
-            <Image source={{ uri: 'https://img.icons8.com/ios-filled/50/222222/clock--v1.png' }} style={styles.sectionHeaderIcon} />
-            <Text style={styles.sectionTitle}>Recent</Text>
-          </View>
-          {recentFiles.map((item, idx) => (
-            <View key={item.id} style={styles.fileRow}>
-              <Image source={{ uri: item.thumb }} style={styles.fileThumbImg} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fileName}>{item.name}</Text>
-                  <Text style={styles.fileMeta}>{item.modified}</Text>
+    <View style={{ flex: 1 }}>
+      {/* Split Gradient Background */}
+      <LinearGradient
+        colors={constants.gradient}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 0.5 }}
+        style={StyleSheet.absoluteFill}
+      />
+      <SafeAreaView style={[styles.container, { backgroundColor: 'transparent' }]}> 
+        <ScrollView
+          contentContainerStyle={{ paddingBottom: 80 }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refreshFiles} tintColor={theme.primary} />}
+        >
+          {/* Header Row */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 18, marginBottom: 10, marginHorizontal: 24 }}>
+            <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 28, color: '#fff', letterSpacing: 0.2 }}>Home</Text>
+            <TouchableOpacity
+              style={[styles.bellButton, { padding: 12 }]} // Increased padding for better touch area
+              onPress={() => {
+                markAllRead();
+                navigation.navigate('NotificationScreen');
+              }}
+            >
+              <Feather name="bell" size={32} color={theme.primary} />
+              {unreadCount > 0 && (
+                <View style={styles.bellNumberCircle}>
+                  <Text style={styles.bellNumberText}>{unreadCount}</Text>
                 </View>
-                <TouchableOpacity style={styles.menuButton} activeOpacity={0.7}>
-                <Image source={{ uri: 'https://img.icons8.com/ios-filled/50/888888/more.png' }} style={styles.menuIconImg} />
-              </TouchableOpacity>
+              )}
+            </TouchableOpacity>
+          </View>
+          {/* Glassy Search Bar */}
+          <BlurView intensity={60} tint="dark" style={[styles.glassySearchBarWrap, { backgroundColor: 'rgba(20,40,80,0.18)', borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.10)', overflow: 'hidden' }]}> 
+            <Feather name="search" size={20} color={theme.textSecondary} style={styles.searchIcon} />
+            <TextInput
+              style={[styles.searchInput, { color: theme.searchText, fontFamily: 'Inter_400Regular' }]}
+              placeholder="Search files..."
+              placeholderTextColor={theme.searchPlaceholder}
+              value={searchQuery}
+              onChangeText={handleSearch}
+            />
+          </BlurView>
+          {/* Search Results */}
+          {searchQuery && searchResults !== null && (
+            <BlurView intensity={90} tint="dark" style={{ backgroundColor: theme.card, borderRadius: 18, marginHorizontal: 12, marginBottom: 12, padding: 16, shadowColor: theme.shadow, shadowOpacity: 0.10, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 3, overflow: 'hidden' }}>
+              <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 18, color: theme.text, marginBottom: 10 }}>Search Results</Text>
+              {searchResults.length > 0 ? (
+                <FlatList
+                  data={searchResults}
+                  keyExtractor={item => item.id?.toString()}
+                  renderItem={({ item }) => (
+                    <FileItem
+                      item={item}
+                          onPress={() => handleFilePress(item)}
+                      onMenuPress={() => {}}
+                      onStarPress={() => {}}
+                    />
+                  )}
+                />
+              ) : (
+                <View style={styles.emptyState}>
+                  <Text style={{ color: theme.textSecondary, fontFamily: 'Inter_400Regular', fontSize: 16 }}>No files found</Text>
+                </View>
+              )}
+            </BlurView>
+          )}
+
+          {/* Recent Files Section - Only show this section */}
+          {recentFiles.length > 0 && (
+            <View style={{ marginHorizontal: 12, marginBottom: 18 }}>
+              <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 20, color: '#fff', letterSpacing: 0.2, marginLeft: 8, marginBottom: 8 }}>Recent Files</Text>
+              {recentFiles.map(item => (
+                <FileItem
+                  key={item.id}
+                  item={item.file}
+                  onPress={() => handleFilePress(item.file)}
+                  onMenuPress={() => {}}
+                  onStarPress={() => {}}
+                />
+              ))}
             </View>
-          ))}
-        </View>
-        {/* Enhanced App Description Sections */}
-        <View style={styles.infoSection}>
-          <Image source={{ uri: 'https://images.unsplash.com/photo-1519125323398-675f0ddb6308?auto=format&fit=crop&w=800&q=80' }} style={styles.infoImage} />
-          <Text style={styles.infoCaption}>Your Cloud, Everywhere</Text>
-          <Text style={styles.infoDescription}>Access your files from any device, anywhere in the world. CloudStore keeps your memories and documents safe, secure, and always at your fingertips.</Text>
-        </View>
-        <View style={styles.infoSection}>
-          <Image source={{ uri: 'https://images.unsplash.com/photo-1518717758536-85ae29035b6d?auto=format&fit=crop&w=800&q=80' }} style={styles.infoImage} />
-          <Text style={styles.infoCaption}>Share Moments Instantly</Text>
-          <Text style={styles.infoDescription}>Send photos, videos, and files to friends and family in a tap. With CloudStore, sharing is private, fast, and effortless.</Text>
-        </View>
-        <View style={styles.infoSection}>
-          <Image source={{ uri: 'https://images.unsplash.com/photo-1508214751196-bcfd4ca60f91?auto=format&fit=crop&w=800&q=80' }} style={styles.infoImage} />
-          <Text style={styles.infoCaption}>Stay Effortlessly Organized</Text>
-          <Text style={styles.infoDescription}>Create folders, favorite important files, and find what you need in seconds. CloudStore helps you keep your digital life beautifully organized.</Text>
-        </View>
-        {/* Features group at the bottom */}
-        <View style={styles.featuresBottomRowWrap}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.featuresBottomRow}>
-            {featureImages.map((f, idx) => (
-              <View key={idx} style={styles.featureCardBottom}>
-                <Image source={{ uri: f.uri }} style={styles.featureIconImgBottom} />
-                <Text style={styles.featureLabelBottom}>{f.label}</Text>
-              </View>
-            ))}
-          </ScrollView>
-        </View>
-      </ScrollView>
-    </SafeAreaView>
+          )}
+
+          {/* Features Section */}
+          <View style={{ marginHorizontal: 12, marginBottom: 24 }}>
+            <Text style={{ fontFamily: 'Inter_700Bold', fontSize: 20, color: '#fff', letterSpacing: 0.2, marginLeft: 8, marginBottom: 16 }}>Quick Actions</Text>
+
+            <BlurView intensity={90} tint="dark" style={{
+              backgroundColor: constants.glassBg,
+              borderRadius: 18,
+              borderWidth: 1,
+              borderColor: constants.glassBorder,
+              overflow: 'hidden',
+              shadowColor: '#000',
+              shadowOpacity: 0.08,
+              shadowRadius: 12,
+              shadowOffset: { width: 0, height: 4 },
+              elevation: 3,
+            }}>
+
+
+
+              {/* Document Scanner */}
+              <TouchableOpacity
+                style={styles.featureListItem}
+                onPress={() => navigation.navigate('DocumentScanner')}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.featureListIcon, { backgroundColor: '#8b5cf6' + '20' }]}>
+                  <Feather name="camera" size={20} color="#8b5cf6" />
+                </View>
+                <View style={styles.featureListContent}>
+                  <Text style={styles.featureListTitle}>Scanner</Text>
+                  <Text style={styles.featureListDescription}>Scan documents with camera</Text>
+                </View>
+                <Feather name="chevron-right" size={16} color={constants.secondaryText} />
+              </TouchableOpacity>
+
+              {/* Settings */}
+              <TouchableOpacity
+                style={styles.featureListItem}
+                onPress={() => navigation.navigate('Settings')}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.featureListIcon, { backgroundColor: '#ef4444' + '20' }]}>
+                  <Feather name="settings" size={20} color="#ef4444" />
+                </View>
+                <View style={styles.featureListContent}>
+                  <Text style={styles.featureListTitle}>Settings</Text>
+                  <Text style={styles.featureListDescription}>Customize app preferences</Text>
+                </View>
+                <Feather name="chevron-right" size={16} color={constants.secondaryText} />
+              </TouchableOpacity>
+
+              {/* Account */}
+              <TouchableOpacity
+                style={styles.featureListItem}
+                onPress={() => navigation.navigate('Account')}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.featureListIcon, { backgroundColor: '#06b6d4' + '20' }]}>
+                  <Feather name="user" size={20} color="#06b6d4" />
+                </View>
+                <View style={styles.featureListContent}>
+                  <Text style={styles.featureListTitle}>Account</Text>
+                  <Text style={styles.featureListDescription}>Manage your profile</Text>
+                </View>
+                <Feather name="chevron-right" size={16} color={constants.secondaryText} />
+              </TouchableOpacity>
+
+              {/* Premium */}
+              <TouchableOpacity
+                style={styles.featureListItem}
+                onPress={() => navigation.navigate('ManagePlan')}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.featureListIcon, { backgroundColor: '#f97316' + '20' }]}>
+                  <Feather name="star" size={20} color="#f97316" />
+                </View>
+                <View style={styles.featureListContent}>
+                  <Text style={styles.featureListTitle}>Premium</Text>
+                  <Text style={styles.featureListDescription}>Upgrade for more features</Text>
+                </View>
+                <Feather name="chevron-right" size={16} color={constants.secondaryText} />
+              </TouchableOpacity>
+
+              {/* Help & Support */}
+              <TouchableOpacity
+                style={[styles.featureListItem, { borderBottomWidth: 0 }]}
+                onPress={() => navigation.navigate('Help')}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.featureListIcon, { backgroundColor: '#ec4899' + '20' }]}>
+                  <Feather name="help-circle" size={20} color="#ec4899" />
+                </View>
+                <View style={styles.featureListContent}>
+                  <Text style={styles.featureListTitle}>Help</Text>
+                  <Text style={styles.featureListDescription}>Get support and find answers</Text>
+                </View>
+                <Feather name="chevron-right" size={16} color={constants.secondaryText} />
+              </TouchableOpacity>
+
+            </BlurView>
+          </View>
+
+          {/* Folders Grid */}
+          {folders.length > 0 && (
+            <View style={styles.foldersGrid}>
+              {folders.map(folder => (
+                <TouchableOpacity key={folder.id} style={[styles.folderCardGrid, { backgroundColor: theme.card, shadowColor: theme.shadow }]} onPress={() => Alert.alert('Open Folder', `Open folder: ${folder.name}`)}>
+                  <Image source={{ uri: 'https://img.icons8.com/color/96/folder-invoices--v2.png' }} style={styles.folderIconImgGrid} />
+                  <Text style={[styles.folderNameGrid, { color: theme.text, fontFamily: 'Inter_400Regular' }]}>{folder.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
-    paddingTop: 10,
   },
-  illustrationWrap: {
-    alignItems: 'center',
-    marginTop: 10,
-    marginBottom: 8,
+  scrollContent: {
+    paddingTop: 20,
+    paddingBottom: 80,
   },
-  headerImage: {
-    width: '96%',
-    height: 120,
-    borderRadius: 18,
+  homeTitleContainer: {
+    paddingHorizontal: 18,
+    paddingVertical: 8,
   },
-  searchBarWrap: {
+  homeTitle: {
+    fontSize: 28,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  heroSearchBarWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f6f6f6',
-    borderRadius: 18,
+    borderRadius: 20,
     marginHorizontal: 18,
-    marginBottom: 18,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    shadowColor: '#000',
-    shadowOpacity: 0.04,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 1,
+    marginBottom: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    shadowOpacity: 0.1,
+    shadowRadius: 15,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
-  searchIconImg: {
-    width: 20,
-    height: 20,
+  searchIcon: {
     marginRight: 8,
-    tintColor: '#888',
   },
   searchInput: {
     flex: 1,
     backgroundColor: 'transparent',
     borderRadius: 16,
-    paddingHorizontal: 8,
-    paddingVertical: 8,
-    fontSize: 17,
-    color: '#222',
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    fontSize: 16,
     fontWeight: '500',
     fontFamily: 'System',
   },
   sectionCard: {
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    marginHorizontal: 16,
-    marginBottom: 18,
-    padding: 20,
-    shadowColor: '#0061FF',
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 3,
-  },
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  sectionHeaderIcon: {
-    width: 18,
-    height: 18,
-    marginRight: 6,
-    tintColor: undefined,
-  },
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    fontFamily: 'System',
-    color: '#222',
-    marginBottom: 8,
-  },
-  fileRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    borderRadius: 16,
+    marginHorizontal: 12,
     marginBottom: 12,
+    padding: 16,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
+    backgroundColor: '#fff',
   },
-  fileThumbImg: {
-    width: 32,
-    height: 32,
-    marginRight: 10,
-    borderRadius: 8,
-    backgroundColor: '#eee',
-  },
-  fileName: {
-    fontSize: 16,
-    color: '#222',
-    fontWeight: 'bold',
-    fontFamily: 'System',
-  },
-  fileMeta: {
-    fontSize: 13,
-    color: '#aaa',
-    fontWeight: '400',
-    fontFamily: 'System',
-  },
-  menuButton: {
-    padding: 8,
-    marginLeft: 8,
-  },
-  menuIconImg: {
-    width: 22,
-    height: 22,
-    tintColor: '#888',
-  },
-  featuresRow: {
+  sectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: 8,
-  },
-  featureCard: {
     alignItems: 'center',
-    flex: 1,
+    marginBottom: 16,
   },
-  featureIconImg: {
+  sectionTitle: {
+    fontSize: 14.5,
+    fontWeight: 'bold',
+    marginBottom: 6,
+  },
+  sketchIllustration: {
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    height: 40,
+    width: 60,
+  },
+  sketchCircle: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    marginBottom: 4,
+  },
+  sketchLine: {
+    width: '100%',
+    height: 3,
+    borderRadius: 2,
+    marginBottom: 4,
+  },
+  sketchDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginBottom: 4,
+  },
+  sketchBar: {
+    height: 4,
+    borderRadius: 2,
+    marginBottom: 3,
+    width: '100%',
+  },
+  sketchLink: {
+    height: 2,
+    borderRadius: 1,
+    marginBottom: 3,
+    width: '100%',
+  },
+  sketchTimeline: {
+    width: 2,
+    height: '100%',
+    borderRadius: 1,
+    position: 'absolute',
+    right: 10,
+  },
+  sketchFile: {
+    height: 3,
+    borderRadius: 2,
+    marginBottom: 3,
+    width: '100%',
+  },
+  sketchStar: {
+    height: 3,
+    borderRadius: 2,
+    marginBottom: 3,
+    width: '100%',
+  },
+  sketchFileType: {
+    height: 4,
+    borderRadius: 2,
+    marginBottom: 4,
+    width: '100%',
+  },
+  sketchCloud: {
+    width: 30,
+    height: 20,
+    borderRadius: 15,
+    marginBottom: 6,
+  },
+  sketchSync: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    marginBottom: 6,
+  },
+  sketchShield: {
+    width: 25,
+    height: 30,
+    borderRadius: 12,
+    marginBottom: 6,
+  },
+  sketchLock: {
+    width: 20,
+    height: 25,
+    borderRadius: 10,
+    marginBottom: 6,
+  },
+  sketchKey: {
+    width: 15,
+    height: 20,
+    borderRadius: 8,
+    marginBottom: 6,
+  },
+  sketchBackup: {
+    width: 25,
+    height: 25,
+    borderRadius: 12,
+    marginBottom: 6,
+  },
+  sketchArrow: {
+    width: 20,
+    height: 3,
+    borderRadius: 2,
+    marginBottom: 6,
+  },
+  sketchServer: {
+    width: 30,
+    height: 20,
+    borderRadius: 10,
+    marginBottom: 6,
+  },
+  sketchUsers: {
+    width: 25,
+    height: 25,
+    borderRadius: 12,
+    marginBottom: 6,
+  },
+  sketchChat: {
+    width: 20,
+    height: 15,
+    borderRadius: 8,
+    marginBottom: 6,
+  },
+  sketchEdit: {
+    width: 15,
+    height: 20,
+    borderRadius: 8,
+    marginBottom: 6,
+  },
+  sketchGraph: {
+    width: 30,
+    height: 20,
+    borderRadius: 10,
+    marginBottom: 6,
+  },
+  sketchMetric: {
+    width: 20,
+    height: 15,
+    borderRadius: 8,
+    marginBottom: 6,
+  },
+  sketchTrend: {
+    width: 25,
+    height: 3,
+    borderRadius: 2,
+    marginBottom: 6,
+  },
+  sketchShare: {
+    width: 25,
+    height: 25,
+    borderRadius: 12,
+    marginBottom: 6,
+  },
+  sketchAudio: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: '100%',
+  },
+  sketchWave: {
+    height: 2,
+    borderRadius: 1,
+    marginBottom: 2,
+    width: '100%',
+  },
+  sketchDocument: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: '100%',
+  },
+  sketchPage: {
+    width: 20,
+    height: 25,
+    borderRadius: 2,
+    marginBottom: 3,
+  },
+  sketchText: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: '100%',
+  },
+  sketchTextLine: {
+    height: 2,
+    borderRadius: 1,
+    marginBottom: 2,
+    width: '100%',
+  },
+  sketchEmpty: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  sketchSearch: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  sketchSearchIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    marginBottom: 6,
+  },
+  sketchSearchLine: {
+    width: 16,
+    height: 2,
+    borderRadius: 1,
+  },
+  recentFilesList: {
+    paddingVertical: 0,
+    paddingHorizontal: 0,
+  },
+  recentFileCard: {
+    width: 110,
+    height: 120,
+    borderRadius: 12,
+    marginRight: 10,
+    padding: 10,
+    backgroundColor: '#f7f7fa',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
+  },
+  recentFileThumbImg: {
     width: 36,
     height: 36,
     marginBottom: 6,
+    borderRadius: 7,
   },
-  featureLabel: {
-    fontSize: 14,
-    color: '#222',
-    fontWeight: 'bold',
-    fontFamily: 'System',
-    textAlign: 'center',
-  },
-  menuOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.08)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  createFolderModal: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 28,
-    minWidth: 260,
-    shadowColor: '#000',
-    shadowOpacity: 0.12,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 8,
-    alignItems: 'stretch',
-  },
-  createFolderTitle: {
-    fontSize: 19,
-    fontWeight: 'bold',
-    color: '#222',
-    marginBottom: 14,
-    fontFamily: 'System',
-  },
-  createFolderInput: {
-    borderWidth: 1,
-    borderColor: '#eee',
-    borderRadius: 12,
-    padding: 12,
-    fontSize: 16,
-    fontFamily: 'System',
-    color: '#222',
-    backgroundColor: '#faf9f7',
-  },
-  scrollContent: {
-    paddingBottom: 60,
-    paddingTop: 10,
-  },
-  infoSection: {
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    marginHorizontal: 16,
-    marginBottom: 18,
-    padding: 18,
-    alignItems: 'center',
-    shadowColor: '#0061FF',
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
-  },
-  infoImage: {
-    width: '100%',
-    height: 120,
-    borderRadius: 12,
-    marginBottom: 12,
-  },
-  infoCaption: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#0061FF',
-    marginBottom: 6,
-    textAlign: 'center',
-  },
-  infoDescription: {
-    fontSize: 15,
-    color: '#444',
-    textAlign: 'center',
+  recentFileName: {
+    fontSize: 12,
+    fontWeight: '600',
     marginBottom: 2,
+    textAlign: 'center',
   },
-  heroSection: {
-    width: '100%',
-    height: 180,
-    marginBottom: 18,
-    position: 'relative',
-    justifyContent: 'flex-end',
-    alignItems: 'stretch',
+  recentFileMeta: {
+    fontSize: 10,
+    color: '#888',
+    textAlign: 'center',
   },
-  heroImage: {
-    width: '100%',
-    height: 180,
+  menuButton: {
+    padding: 6,
+    borderRadius: 20,
     position: 'absolute',
-    top: 0,
-    left: 0,
-  },
-  heroOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: '100%',
-    height: 180,
-    backgroundColor: 'rgba(0,97,255,0.18)',
-  },
-  heroContent: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    alignItems: 'flex-start',
-    paddingHorizontal: 24,
-    paddingTop: 32,
-    paddingBottom: 18,
-    zIndex: 2,
-  },
-  welcomeText: {
-    fontSize: 26,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 14,
-    letterSpacing: 0.2,
-    textShadowColor: 'rgba(0,0,0,0.12)',
-    textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 6,
-  },
-  heroSearchBarWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    shadowColor: '#000',
-    shadowOpacity: 0.04,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 1,
-    width: '100%',
-    maxWidth: 400,
-    alignSelf: 'flex-start',
-    zIndex: 2,
-  },
-  createFolderPadIconWrap: {
-    marginHorizontal: 18,
-    marginTop: 18,
-    marginBottom: 8,
-    alignItems: 'flex-start',
-  },
-  createFolderIconBtn: {
-    backgroundColor: '#f6f8fc',
-    borderRadius: 16,
-    padding: 14,
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: '#e0e7ef',
+    top: 8,
+    right: 8,
   },
   foldersGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    marginHorizontal: 18,
-    marginBottom: 12,
+    justifyContent: 'flex-start',
+    marginHorizontal: 10,
+    marginBottom: 10,
   },
   folderCardGrid: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
     alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 14,
-    marginBottom: 14,
-    paddingVertical: 16,
-    paddingHorizontal: 18,
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
-    minWidth: 110,
-    maxWidth: 140,
+    borderRadius: 12,
+    margin: 8,
+    padding: 12,
+    width: 110,
+    shadowOpacity: 0.03,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
   },
   folderIconImgGrid: {
-    width: 40,
-    height: 40,
+    width: 48,
+    height: 48,
     marginBottom: 6,
   },
   folderNameGrid: {
     fontSize: 15,
-    color: '#222',
-    fontWeight: 'bold',
+    fontWeight: '500',
+    marginBottom: 2,
     textAlign: 'center',
   },
-  createFolderModalInline: {
-    flexDirection: 'row',
+  emptyState: {
     alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    padding: 40,
+  },
+  emptyText: {
+    fontSize: 16,
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  modalContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    borderRadius: 20,
+    width: screenWidth * 0.95,
+    height: screenHeight * 0.9,
+    overflow: 'hidden',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    flex: 1,
+    marginRight: 16,
+  },
+  modalCloseButton: {
+    padding: 8,
+    borderRadius: 20,
+  },
+  modalBody: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingContainer: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    marginTop: 16,
+    fontSize: 16,
+  },
+  previewScrollView: {
+    flex: 1,
     width: '100%',
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
   },
-  createFolderBtn: {
-    backgroundColor: '#0061FF',
+  previewScrollContent: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    minHeight: '100%',
+  },
+  previewImage: {
+    width: screenWidth * 0.9,
+    height: screenHeight * 0.6,
     borderRadius: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 18,
-    marginRight: 8,
   },
-  createFolderBtnText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 16,
+  previewVideoContainer: {
+    flex: 1,
+    width: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  cancelFolderBtn: {
-    backgroundColor: '#eee',
+  previewVideo: {
+    width: screenWidth * 0.9,
+    height: screenHeight * 0.6,
     borderRadius: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
   },
-  cancelFolderBtnText: {
-    color: '#0061FF',
-    fontWeight: 'bold',
-    fontSize: 16,
+  previewAudioContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
   },
-  featuresBottomRowWrap: {
-    marginTop: 18,
+  audioVisualizer: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    justifyContent: 'center',
+    alignItems: 'center',
     marginBottom: 24,
   },
-  featuresBottomRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingLeft: 12,
-    paddingRight: 8,
+  audioTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 24,
+    textAlign: 'center',
   },
-  featureCardBottom: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
+  playButton: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  previewWebView: {
+    flex: 1,
+    width: '100%',
+    borderRadius: 12,
+  },
+  previewText: {
+    fontSize: 16,
+    padding: 20,
+    lineHeight: 24,
+  },
+  previewUnsupported: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  previewUnsupportedText: {
+    fontSize: 18,
+    marginBottom: 24,
+    textAlign: 'center',
+  },
+  openFileButton: {
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 25,
+  },
+  openFileButtonText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  filePreviewContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 8,
+    marginBottom: 6,
+    overflow: 'hidden',
+  },
+  filePreviewImage: {
+    width: '100%',
+    height: '100%',
+  },
+  videoPreviewContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  videoPlayOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  audioPreviewContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  pdfPreviewContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  textPreviewContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  illustrationSection: {
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 14,
-    paddingVertical: 18,
-    paddingHorizontal: 18,
-    shadowColor: '#003366',
-    shadowOpacity: 0.22,
-    shadowRadius: 15,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
-    minWidth: 120,
-    maxWidth: 180,
+    paddingVertical: 20,
   },
-  featureIconImgBottom: {
-    width: 36,
-    height: 36,
+  sketchContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+    height: 60,
+  },
+  illustrationText: {
+    fontSize: 14,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+
+  popularBadge: {
+    backgroundColor: '#ff6b35',
+    borderRadius: 12,
+    padding: 4,
+    position: 'absolute',
+    top: 8,
+    right: 8,
+  },
+  illustrationImage: {
+    width: '100%',
+    height: 120,
+    marginBottom: 12,
+    borderRadius: 12,
+  },
+  featureCard: {
+    width: '100%',
+    borderRadius: 18,
+    marginBottom: 16,
+    overflow: 'hidden',
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
+  },
+  featureImage: {
+    width: '100%',
+    height: 200,
+  },
+  featureContent: {
+    padding: 20,
+  },
+  featureTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    textAlign: 'center',
     marginBottom: 8,
   },
-  featureLabelBottom: {
-    fontSize: 15,
-    fontWeight: 'bold',
-    color: '#222',
+  featureDescription: {
+    fontSize: 14,
     textAlign: 'center',
+    lineHeight: 20,
+  },
+  featureCardDropbox: {
+    width: '100%',
+    marginBottom: 24,
+    paddingHorizontal: 0,
+    backgroundColor: 'transparent',
+  },
+  featureContentDropbox: {
+    paddingHorizontal: 16,
+    paddingTop: 18,
+    paddingBottom: 10,
+  },
+  featureTitleDropbox: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 6,
+    textAlign: 'left',
+  },
+  featureDescriptionDropbox: {
+    fontSize: 15,
+    fontWeight: '500',
+    marginBottom: 0,
+    textAlign: 'left',
+  },
+  featureImageDropbox: {
+    width: '100%',
+    height: 180,
+    marginTop: 0,
+    borderRadius: 0,
+  },
+  featureBannerDropbox: {
+    width: '100%',
+    marginBottom: 24,
+    paddingHorizontal: 0,
+    backgroundColor: 'transparent',
+  },
+  featureBannerImageWrapDropbox: {
+    width: '100%',
+    aspectRatio: 1.7,
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  featureBannerImageDropbox: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 0,
+  },
+  featureBannerTextOverlayDropboxHome: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    width: '100%',
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    backgroundColor: 'transparent',
+    alignItems: 'flex-end',
+  },
+  featureBannerTitleDropboxHome: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    textAlign: 'right',
+    color: '#fff',
+    textShadowColor: 'rgba(0,0,0,0.35)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 6,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 18,
+    marginTop: 10,
+    marginBottom: 16,
+    paddingVertical: 8,
+  },
+  headerTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+  },
+  bellButton: {
+    marginLeft: 12,
+    position: 'relative',
+    padding: 6,
+  },
+  bellBlueTick: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#2563eb',
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
+  bellBadge: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#2563eb',
+    borderWidth: 2,
+    borderColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    zIndex: 10,
+  },
+  bellBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: 'bold',
+    textAlign: 'center',
+    paddingHorizontal: 1,
+  },
+  featureCard: {
+    width: 160,
+    marginHorizontal: 8,
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  featureCardBlur: {
+    backgroundColor: 'rgba(20,40,80,0.32)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.10)',
+    borderRadius: 20,
+    padding: 20,
+    alignItems: 'center',
+    minHeight: 140,
+    justifyContent: 'center',
+  },
+  featureIconContainer: {
+    borderRadius: 16,
+    padding: 12,
+    marginBottom: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  featureTitle: {
+    fontFamily: 'Inter_700Bold',
+    fontSize: 16,
+    color: '#fff',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  featureDescription: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.7)',
+    textAlign: 'center',
+    lineHeight: 16,
+  },
+  featureListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: 0.5,
+    borderBottomColor: 'rgba(255,255,255,0.1)',
+  },
+  featureListIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  featureListContent: {
+    flex: 1,
+  },
+  featureListTitle: {
+    fontFamily: 'Inter_700Bold',
+    fontSize: 16,
+    color: '#fff',
+    marginBottom: 2,
+  },
+  featureListDescription: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.7)',
+  },
+  glassySearchBarWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 20, // reduced from 32
+    marginHorizontal: 0,
+    marginBottom: 16,
+    paddingHorizontal: 14, // slightly reduced
+    paddingVertical: 8, // reduced from 14
+    shadowOpacity: 0.12,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
+    backgroundColor: 'rgba(20,40,80,0.32)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.10)',
+    width: '95%',
+    alignSelf: 'center',
+  },
+  filePadGlass: {
+    borderRadius: 18,
+    borderWidth: 1.2,
+    borderColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: 'rgba(20,40,80,0.32)',
+    marginRight: 12,
+    marginBottom: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.10,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+    overflow: 'hidden',
+    alignItems: 'center',
+    padding: 16,
+  },
+  filePadTouchable: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 110,
+    height: 120,
+  },
+  outerPadGlass: {
+    backgroundColor: 'rgba(20,40,80,0.32)',
+    borderRadius: 36,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+    padding: 32,
+    marginHorizontal: 12,
+    marginBottom: 18,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12,
+  },
+  bellNumber: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    fontFamily: 'Inter_700Bold',
+    fontSize: 15,
+    color: '#fff',
+    fontWeight: 'bold',
+    zIndex: 10,
+  },
+  bellNumberCircle: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#2563eb',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+  },
+  bellNumberText: {
+    color: '#fff',
+    fontFamily: 'Inter_700Bold',
+    fontSize: 12,
+    fontWeight: 'bold',
+    textAlign: 'center',
+    paddingHorizontal: 2,
   },
 }); 

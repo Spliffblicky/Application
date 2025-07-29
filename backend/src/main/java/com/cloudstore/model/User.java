@@ -10,6 +10,8 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
+@Getter
+@Setter
 public class User {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -30,6 +32,17 @@ public class User {
 
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+
+    @Column(name = "storage_limit")
+private Long storageLimit = 500_000_000L; // Default 500MB
+
+@Column(name = "used_storage")
+private Long usedStorage = 0L;
+
+public boolean isOutOfStorage() {
+    return usedStorage >= storageLimit;
+}
+
 
     @PrePersist
     protected void onCreate() {
